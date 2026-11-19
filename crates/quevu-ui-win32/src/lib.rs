@@ -25,7 +25,7 @@ use quevu_ui_core::UnitState;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontIndirectW, CreateFontW, DeleteObject, GetDC, GetSysColorBrush, GetTextMetricsW,
-    ReleaseDC, SelectObject, SetBkMode, COLOR_BTNFACE, COLOR_WINDOW, HFONT, TEXTMETRICW, TRANSPARENT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, COLOR_BTNFACE, COLOR_WINDOW, HFONT, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
     ActivateActCtx, CreateActCtxW, DeactivateActCtx, ReleaseActCtx, ACTCTXW,
@@ -34,7 +34,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::UI::Controls::{
     InitCommonControlsEx, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, NMHDR, TCIF_TEXT, TCITEMW,
-    TCM_ADJUSTRECT, TCM_DELETEITEM, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE,
+    TCM_ADJUSTRECT, TCM_DELETEITEM, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCM_SETITEMW,
+    TCN_SELCHANGE,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
@@ -45,12 +46,13 @@ use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect, GetCursorPos, GetMessageW,
     IsDialogMessageW, IsWindowVisible, LoadCursorW, LoadIconW, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, SetMenu, SetWindowPos,
     SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BS_PUSHBUTTON,
-    CW_USEDEFAULT, HMENU, HWND_BOTTOM, HWND_TOP, IDC_ARROW, IDI_APPLICATION, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    CW_USEDEFAULT, HMENU, HWND_BOTTOM, HWND_TOP, IDC_ARROW, IDI_APPLICATION, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED,
     MSG, NONCLIENTMETRICSW, SIZE_MINIMIZED, SPI_GETNONCLIENTMETRICS,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
     TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
@@ -89,6 +91,7 @@ const ID_EXIT: u32 = 103;
 const ID_TOGGLE: u32 = 110;
 const ID_COPY: u32 = 111;
 const ID_OPEN: u32 = 112;
+const ID_TIME: u32 = 113;
 const ID_UNIT_BASE: u32 = 1000;
 const ID_MENU_BASE: u32 = 5000;
 
@@ -104,7 +107,10 @@ struct Unit {
 struct Tab {
     id: u32,
     view: HWND,
+    title: String,
     note: String,
+    /// Output arrived while another tab was in front.
+    unseen: bool,
 }
 
 struct App {
@@ -126,6 +132,8 @@ struct App {
     units: Vec<Unit>,
     tabs: Vec<Tab>,
     app_menu: HMENU,
+    console_menu: HMENU,
+    show_time: bool,
     menu_items: Vec<u32>,
     tray: bool,
     tray_shown: bool,
@@ -216,6 +224,8 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         units: Vec::new(),
         tabs: Vec::new(),
         app_menu: null_mut(),
+        console_menu: null_mut(),
+        show_time: false,
         menu_items: Vec::new(),
         tray: false,
         tray_shown: false,
@@ -390,6 +400,9 @@ impl App {
         let console = CreatePopupMenu();
         AppendMenuW(console, MF_STRING, ID_TOGGLE as usize, wide("&Hold / follow the output\tEnd").as_ptr());
         AppendMenuW(console, MF_STRING, ID_COPY as usize, wide("&Copy\tCtrl+C").as_ptr());
+        AppendMenuW(console, MF_SEPARATOR, 0, null());
+        AppendMenuW(console, MF_STRING, ID_TIME as usize, wide("Show the &time of each line").as_ptr());
+        self.console_menu = console;
         AppendMenuW(bar, MF_POPUP, console as usize, wide("&Console").as_ptr());
         SetMenu(self.hwnd, bar);
 
@@ -504,6 +517,12 @@ impl App {
         }
         // The transport button belongs to the consoles.
         ShowWindow(self.toggle, if cur.is_some() { SW_SHOW } else { SW_HIDE });
+        if let Some(i) = cur {
+            if self.tabs[i].unseen {
+                self.tabs[i].unseen = false;
+                self.retitle(i);
+            }
+        }
         for (i, t) in self.tabs.iter().enumerate() {
             if Some(i) == cur {
                 SetWindowPos(t.view, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -513,6 +532,18 @@ impl App {
             }
         }
         self.refresh_strip();
+    }
+
+    /// Writes the title of a console tab, with a mark if it holds output
+    /// nobody has looked at.
+    unsafe fn retitle(&self, i: usize) {
+        let t = &self.tabs[i];
+        let label = if t.unseen { format!("{} \u{2022}", t.title) } else { t.title.clone() };
+        let mut text = wide(&label);
+        let mut item: TCITEMW = zeroed();
+        item.mask = TCIF_TEXT;
+        item.pszText = text.as_mut_ptr();
+        SendMessageW(self.tabs_ctl, TCM_SETITEMW, i + 1, &item as *const TCITEMW as LPARAM);
     }
 
     unsafe fn refresh_strip(&mut self) {
@@ -611,7 +642,12 @@ impl App {
                 // After the page of switches and the consoles already there.
                 let at = self.tabs.len() + 1;
                 SendMessageW(self.tabs_ctl, TCM_INSERTITEMW, at, &item as *const TCITEMW as LPARAM);
-                self.tabs.push(Tab { id, view, note: String::new() });
+                self.tabs.push(Tab { id, view, title, note: String::new(), unseen: false });
+                if self.show_time {
+                    if let Some(v) = view::of(view) {
+                        v.set_show_time(true);
+                    }
+                }
                 self.layout();
                 self.show_current();
                 // The console asks for its first page as soon as it exists.
@@ -620,9 +656,16 @@ impl App {
                 }
             }
             Command::Deliver { tab, op, full, lines } => {
-                if let Some(t) = self.tabs.iter().find(|t| t.id == tab) {
-                    if let Some(v) = view::of(t.view) {
+                if let Some(i) = self.tabs.iter().position(|t| t.id == tab) {
+                    // New output on a tab that is not in front leaves a
+                    // mark on its title.
+                    let fresh = op == quevu_ui_core::op::LIVE && !lines.is_empty();
+                    if let Some(v) = view::of(self.tabs[i].view) {
                         v.deliver(op, full, lines);
+                    }
+                    if fresh && self.current() != Some(i) && !self.tabs[i].unseen {
+                        self.tabs[i].unseen = true;
+                        self.retitle(i);
                     }
                 }
             }
@@ -725,6 +768,17 @@ impl App {
             ID_STOP_ALL => self.shared.emit(Event::simple(event::STOP_ALL, 0)),
             ID_EXIT => self.shared.emit(Event::simple(event::CLOSE, 0)),
             ID_OPEN => self.restore(),
+            ID_TIME => {
+                self.show_time = !self.show_time;
+                let mark = if self.show_time { MF_CHECKED } else { MF_UNCHECKED };
+                CheckMenuItem(self.console_menu, ID_TIME, mark);
+                let views: Vec<HWND> = self.tabs.iter().map(|t| t.view).collect();
+                for h in views {
+                    if let Some(v) = view::of(h) {
+                        v.set_show_time(self.show_time);
+                    }
+                }
+            }
             ID_TOGGLE | ID_COPY => {
                 let Some(i) = self.current() else { return };
                 let hview = self.tabs[i].view;
@@ -848,6 +902,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // strip is on the window, the unit labels on a tab page.
             SetBkMode(wparam as _, TRANSPARENT as _);
             let on = if lparam as HWND == app.strip { COLOR_BTNFACE } else { COLOR_WINDOW };
+            // The state of a unit is told by color too.
+            if let Some(u) = app.units.iter().find(|u| u.label == lparam as HWND) {
+                let color = match u.state {
+                    UnitState::Running => util::rgb(0x10, 0x7c, 0x10),
+                    UnitState::Failed => util::rgb(0xc4, 0x2b, 0x1c),
+                    UnitState::Starting | UnitState::Stopping => util::rgb(0x9d, 0x5d, 0x00),
+                    UnitState::Stopped => util::rgb(0x60, 0x60, 0x60),
+                };
+                SetTextColor(wparam as _, color);
+            }
             GetSysColorBrush(on) as LRESULT
         }
         WM_CLOSE => {

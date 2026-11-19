@@ -12,7 +12,10 @@ use std::sync::Arc;
 use quevu_ui_core::console::{Console, Line, Request, Status};
 use quevu_ui_core::shared::{Event, Shared};
 
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    FILETIME, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM,
+};
+use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
     DeleteObject, EndPaint, ExtTextOutW, FillRect, InvalidateRect, SelectObject, SetBkColor,
@@ -75,6 +78,29 @@ pub(crate) struct View {
     anchor: Option<Pos>,
     caret: Pos,
     dragging: bool,
+    /// Whether each line shows when it entered the log.
+    show_time: bool,
+}
+
+/// Width of the time margin, in cells: "HH:MM:SS.mmm" and a space.
+const TIME_COLS: i32 = 13;
+
+/// The local time of day of a chunk, as "HH:MM:SS.mmm".
+unsafe fn clock(time_ns: i64) -> Vec<u16> {
+    // Windows counts in units of 100 ns from 1601; the chunk carries
+    // nanoseconds from 1970.
+    let ticks = (time_ns / 100 + 116_444_736_000_000_000) as u64;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let mut utc: SYSTEMTIME = zeroed();
+    let mut local: SYSTEMTIME = zeroed();
+    if FileTimeToSystemTime(&ft, &mut utc) == 0
+        || SystemTimeToTzSpecificLocalTime(null(), &utc, &mut local) == 0
+    {
+        return Vec::new();
+    }
+    format!("{:02}:{:02}:{:02}.{:03}", local.wHour, local.wMinute, local.wSecond, local.wMilliseconds)
+        .encode_utf16()
+        .collect()
 }
 
 /// What the creator of a view hands over through CreateWindowEx.
@@ -176,6 +202,21 @@ impl View {
         self.resized();
     }
 
+    /// Width of the time margin, in pixels.
+    fn gutter(&self) -> i32 {
+        if self.show_time {
+            TIME_COLS * self.cw
+        } else {
+            0
+        }
+    }
+
+    /// Shows or hides the time of each line.
+    pub(crate) unsafe fn set_show_time(&mut self, on: bool) {
+        self.show_time = on;
+        self.changed();
+    }
+
     unsafe fn client(&self) -> (i32, i32) {
         let mut rc: RECT = zeroed();
         GetClientRect(self.hwnd, &mut rc);
@@ -183,7 +224,7 @@ impl View {
     }
 
     unsafe fn cols(&self) -> i32 {
-        ((self.client().0 - PAD) / self.cw).max(1)
+        ((self.client().0 - PAD - self.gutter()) / self.cw).max(1)
     }
 
     unsafe fn resized(&mut self) {
@@ -253,7 +294,7 @@ impl View {
     unsafe fn hit(&self, x: i32, y: i32) -> Pos {
         let row = y.div_euclid(self.ch) as i64;
         let line = self.model.origin() + self.model.top() as i64 + row;
-        let col = self.hpos + (x - PAD + self.cw / 2).div_euclid(self.cw);
+        let col = self.hpos + (x - PAD - self.gutter() + self.cw / 2).div_euclid(self.cw);
         (line, col.max(0))
     }
 
@@ -341,7 +382,7 @@ impl View {
         }
         SetTextColor(dc, fg);
         SetBkColor(dc, bg);
-        let x = PAD + (from - self.hpos) * self.cw;
+        let x = PAD + self.gutter() + (from - self.hpos) * self.cw;
         ExtTextOutW(dc, x, y, 0, null(), text[from as usize..].as_ptr(), (to - from) as u32, null());
     }
 
@@ -367,6 +408,14 @@ impl View {
         let top = self.model.top();
         for (row, line) in self.model.lines().iter().skip(top).take(self.model.rows() + 1).enumerate() {
             let y = row as i32 * self.ch;
+            if self.show_time && !line.is_note() {
+                // The time sits in a margin of its own: it is not part of
+                // the text, so it is never selected or copied.
+                let stamp = clock(line.time_ns);
+                SetTextColor(mem, NOTE_FG);
+                SetBkColor(mem, BG);
+                ExtTextOutW(mem, PAD, y, 0, null(), stamp.as_ptr(), stamp.len() as u32, null());
+            }
             let text: Vec<u16> = line.text.encode_utf16().collect();
             let len = text.len() as i32;
             let base = if line.is_note() { NOTE_FG } else { FG };
@@ -480,6 +529,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             anchor: None,
             caret: (0, 0),
             dragging: false,
+            show_time: false,
         });
         set_state(hwnd, Box::into_raw(view));
         return DefWindowProcW(hwnd, msg, wparam, lparam);
