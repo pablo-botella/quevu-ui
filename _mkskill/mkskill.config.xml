@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mkskill>
+  <project id="main" name="quevu-ui" project-type="Other">
+    <meta>
+      <license>MIT</license>
+      <description>The window of quevu as a dynamic library with a C interface, written in Rust on native toolkits (Win32 working; GTK and Cocoa not written yet): switches, tabs with pseudo-consoles, menu and tray icon. Use when working with the quevu-ui Cargo workspace, quevu_ui.h, quevu_ui.dll, or when writing a new backend.</description>
+    </meta>
+  </project>
+</mkskill>
