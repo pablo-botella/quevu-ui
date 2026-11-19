@@ -276,12 +276,25 @@ impl Console {
         }
     }
 
-    /// A search found something somewhere else in the log: the window is
-    /// replaced by the lines around it and the view is held on them, with
-    /// the line found a third of the way down. Returns the request to
-    /// send if the console was following.
+    /// A search found a line. If the console already holds it, nothing is
+    /// reloaded: the line is told apart and the view moves only if it has
+    /// to, so walking through matches that are close together is smooth.
+    /// Otherwise the window is replaced by the lines around it, with the
+    /// line found a third of the way down. Either way the view is held.
+    /// Returns the request to send if the console was following.
     pub fn goto(&mut self, lines: Vec<Line>, mark: u64) -> Option<Request> {
         let was_following = self.is_following();
+        if let Some(at) = self.lines.iter().position(|l| l.seq == mark) {
+            self.status = Status::Paused;
+            self.mark = Some(mark);
+            // In sight means comfortably in sight: a line on the very
+            // edge of the view is brought in.
+            let margin = (self.rows / 4).min(2);
+            if at < self.top + margin || at + margin >= self.top + self.rows {
+                self.top = at.saturating_sub(self.rows / 3).min(self.max_top());
+            }
+            return was_following.then_some(Request { op: op::PAUSE, seq: 0, n: 0 });
+        }
         self.lines.clear();
         for c in lines {
             self.append(c);
@@ -632,6 +645,30 @@ mod tests {
         c.follow();
         c.deliver(op::FOLLOW, false, lines(981, 1000));
         assert_eq!(c.mark(), None);
+    }
+
+    #[test]
+    fn a_match_already_held_is_marked_without_reloading() {
+        let mut c = started(100);
+        c.scroll_by(-1);
+        c.deliver(op::BEFORE, false, lines(61, 80));
+        let held = seqs(&c);
+        let on_screen = visible(&c);
+        // In sight: nothing moves at all.
+        let target = on_screen[4];
+        assert_eq!(c.goto(lines(target - 2, target + 2), target), None);
+        assert_eq!(c.mark(), Some(target));
+        assert_eq!(seqs(&c), held);
+        assert_eq!(visible(&c), on_screen);
+        // Held but out of sight: the view moves, the window stays.
+        assert_eq!(c.goto(lines(60, 64), 62), None);
+        assert_eq!(seqs(&c), held);
+        assert!(visible(&c).contains(&62));
+        // From the live output it is held first.
+        let mut c = started(100);
+        assert_eq!(c.goto(Vec::new(), 95), Some(Request { op: op::PAUSE, seq: 0, n: 0 }));
+        assert_eq!(c.status(), Status::Paused);
+        assert_eq!(visible(&c), (91..=100).collect::<Vec<_>>());
     }
 
     #[test]

@@ -42,7 +42,7 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_SHIFT,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_F3, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -57,7 +57,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MF_STRING, MF_UNCHECKED,
     MSG, NONCLIENTMETRICSW, SIZE_MINIMIZED, SPI_GETNONCLIENTMETRICS,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
-    TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_NCDESTROY, WM_NOTIFY, WM_NULL, WM_RBUTTONUP, WM_SETFONT, WM_SIZE,
     WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT,
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
@@ -71,12 +71,7 @@ const WM_QV_WAKE: u32 = WM_APP + 1;
 pub(crate) const WM_QV_STATE: u32 = WM_APP + 2;
 /// Something happened to the icon in the notification area.
 const WM_QV_TRAY: u32 = WM_APP + 3;
-/// A console view reports something the user asked for that is not the
-/// view's to do. `wparam` says what; `lparam` is the tab.
-pub(crate) const WM_QV_WANT: u32 = WM_APP + 4;
-pub(crate) const WANT_FIND_BOX: usize = 1;
-pub(crate) const WANT_FIND_OLDER: usize = 2;
-pub(crate) const WANT_FIND_NEWER: usize = 3;
+
 
 const CLASS: &str = "QuevuPanelWindow";
 /// The plain background of the page of switches: a window that does
@@ -86,6 +81,9 @@ const PAGE_CLASS: &str = "QuevuPanelPage";
 // Pause and play in the symbol font of the system (Segoe MDL2 Assets).
 const GLYPH_PAUSE: &str = "\u{e769}";
 const GLYPH_PLAY: &str = "\u{e768}";
+// Chevrons, for walking through the matches of a search.
+const GLYPH_UP: &str = "\u{e70e}";
+const GLYPH_DOWN: &str = "\u{e70d}";
 
 // Styles of the STATIC control.
 const SS_NOPREFIX: u32 = 0x80;
@@ -156,6 +154,8 @@ struct App {
     strip: HWND,
     toggle: HWND,
     find_edit: HWND,
+    find_older: HWND,
+    find_newer: HWND,
     units: Vec<Unit>,
     tabs: Vec<Tab>,
     app_menu: HMENU,
@@ -249,6 +249,8 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         strip: null_mut(),
         toggle: null_mut(),
         find_edit: null_mut(),
+        find_older: null_mut(),
+        find_newer: null_mut(),
         units: Vec::new(),
         tabs: Vec::new(),
         app_menu: null_mut(),
@@ -280,6 +282,23 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
 
     let mut msg: MSG = zeroed();
     while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+        // The keys of the search work wherever the keyboard is: in the
+        // console, in the search box, on a tab. They are taken here, on
+        // the way in, so no control has to know about them.
+        if msg.message == WM_KEYDOWN {
+            let shift = GetKeyState(VK_SHIFT as i32) < 0;
+            let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+            let id = match msg.wParam as u16 {
+                VK_F3 if shift => Some(ID_FIND_NEWER),
+                VK_F3 => Some(ID_FIND_OLDER),
+                k if ctrl && k == b'F' as u16 => Some(ID_FIND),
+                _ => None,
+            };
+            if let Some(id) = id {
+                PostMessageW(hwnd, WM_COMMAND, id as usize, 0);
+                continue;
+            }
+        }
         // Lets Tab walk through the switches like in a dialog.
         if IsDialogMessageW(hwnd, &msg) == 0 {
             TranslateMessage(&msg);
@@ -474,8 +493,16 @@ impl App {
             null(),
         );
         SendMessageW(self.find_edit, WM_SETFONT, self.font_ui as usize, 1);
-        let cue = wide("Find in this log (Enter: older, Shift+Enter: newer)");
+        let cue = wide("Find in this log");
         SendMessageW(self.find_edit, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
+        // The same two steps the keys take, for the mouse: up is older,
+        // down is newer, as the text itself runs.
+        self.find_older = self.child("BUTTON", GLYPH_UP, BS_PUSHBUTTON as u32, ID_FIND_OLDER);
+        self.find_newer = self.child("BUTTON", GLYPH_DOWN, BS_PUSHBUTTON as u32, ID_FIND_NEWER);
+        for h in [self.find_older, self.find_newer] {
+            SendMessageW(h, WM_SETFONT, self.font_icon as usize, 1);
+            ShowWindow(h, SW_HIDE);
+        }
         // Pin the stacking order instead of trusting the order of
         // creation: the tab control at the very bottom, the background of
         // the page right above it, everything else over both.
@@ -544,9 +571,14 @@ impl App {
         SetWindowPos(self.toggle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
         let sy = pad + th + (strip_h - bh) / 2;
-        let fw = self.s(330).min(tw / 2);
-        MoveWindow(self.find_edit, tx + tw - fw, sy + self.s(2), fw, self.s(24), 1);
-        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - fw - pad * 2).max(0), self.s(18), 1);
+        let fb = self.s(26);
+        let fw = self.s(260).min(tw / 3);
+        let right = tx + tw;
+        MoveWindow(self.find_newer, right - fb, sy + self.s(1), fb, fb, 1);
+        MoveWindow(self.find_older, right - fb * 2 - self.s(2), sy + self.s(1), fb, fb, 1);
+        let used = fw + fb * 2 + self.s(8);
+        MoveWindow(self.find_edit, right - used, sy + self.s(2), fw, self.s(24), 1);
+        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - used - pad * 2).max(0), self.s(18), 1);
         let _ = w;
     }
 
@@ -571,7 +603,9 @@ impl App {
         }
         // The transport button belongs to the consoles.
         ShowWindow(self.toggle, if cur.is_some() { SW_SHOW } else { SW_HIDE });
-        ShowWindow(self.find_edit, if cur.is_some() { SW_SHOW } else { SW_HIDE });
+        for h in [self.find_edit, self.find_older, self.find_newer] {
+            ShowWindow(h, if cur.is_some() { SW_SHOW } else { SW_HIDE });
+        }
         if let Some(i) = cur {
             if self.tabs[i].unseen {
                 self.tabs[i].unseen = false;
@@ -882,8 +916,17 @@ impl App {
                     SendMessageW(self.find_edit, EM_SETSEL, 0, -1);
                 }
             }
-            ID_FIND_OLDER => self.find(false),
-            ID_FIND_NEWER => self.find(true),
+            ID_FIND_OLDER | ID_FIND_NEWER => {
+                self.find(id == ID_FIND_NEWER);
+                // A click leaves the keyboard on the button; it goes back
+                // to the console, where the next key is expected.
+                let focus = GetFocus();
+                if focus == self.find_older || focus == self.find_newer {
+                    if let Some(i) = self.current() {
+                        SetFocus(self.tabs[i].view);
+                    }
+                }
+            }
             // Enter and Escape reach the window as commands. They mean
             // something only while the search box has the keyboard.
             ID_ENTER if GetFocus() == self.find_edit => {
@@ -971,16 +1014,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
-        WM_QV_WANT => {
-            // What the view asked for is done the same way the menu does.
-            match wparam {
-                WANT_FIND_BOX => app.command(ID_FIND),
-                WANT_FIND_OLDER => app.command(ID_FIND_OLDER),
-                WANT_FIND_NEWER => app.command(ID_FIND_NEWER),
-                _ => {}
-            }
-            0
-        }
         WM_QV_TRAY => {
             match loword(lparam as usize) {
                 WM_LBUTTONDBLCLK => app.restore(),
@@ -1004,7 +1037,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit] {
                 SendMessageW(h, WM_SETFONT, app.font_ui as usize, 1);
             }
-            SendMessageW(app.toggle, WM_SETFONT, app.font_icon as usize, 1);
+            for h in [app.toggle, app.find_older, app.find_newer] {
+                SendMessageW(h, WM_SETFONT, app.font_icon as usize, 1);
+            }
             for u in &app.units {
                 SendMessageW(u.button, WM_SETFONT, app.font_ui as usize, 1);
                 SendMessageW(u.label, WM_SETFONT, app.font_ui as usize, 1);

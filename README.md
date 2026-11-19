@@ -100,7 +100,9 @@ position, 300 chunks at a time, with `CONSOLE_REQUEST` events.
 
 Keys: arrows and Page Up/Down scroll, Home goes to the top of the window,
 End resumes, Ctrl+A selects all, Ctrl+C copies, Ctrl+F goes to the search
-box, F3 and Shift+F3 look for the next older and newer match. Shift+wheel
+box, F3 and Shift+F3 look for the next older and newer match. The search
+keys work wherever the keyboard is, and the two arrows next to the search
+box do the same for the mouse: up is older, down is newer. Shift+wheel
 scrolls sideways.
 
 **Searching.** The window never searches. It asks the host for one step
@@ -108,8 +110,10 @@ scrolls sideways.
 what comes back. A step examines a bounded stretch of the log, so a search
 never runs to the end of a log of millions of lines by itself:
 
-- found: the console moves to the lines around the match, holds the view
-  and tells the line apart;
+- found: the view is held and the line told apart. If the console already
+  holds that line nothing is reloaded, and the view moves only if the
+  line is not comfortably in sight; otherwise the console moves to the
+  lines around it;
 - not found within the stretch: the strip says how far the step got, and
   asking for the same text again goes on from there;
 - not found and nothing further: the strip says so.

@@ -27,7 +27,7 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_F3, VK_HOME,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_HOME,
     VK_NEXT, VK_PRIOR, VK_SHIFT, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -181,9 +181,15 @@ impl View {
 
     /// Moves to the lines around something a search found.
     pub(crate) unsafe fn goto(&mut self, lines: Vec<Line>, mark: u64) {
-        self.anchor = None;
-        self.hpos = 0;
+        // A selection is anchored to this window of lines: it only
+        // survives if the window does.
+        let origin = self.model.origin();
+        let held = self.model.lines().len();
         let r = self.model.goto(lines, mark);
+        if self.model.origin() != origin || self.model.lines().len() != held {
+            self.anchor = None;
+            self.hpos = 0;
+        }
         self.emit(r);
         self.changed();
     }
@@ -516,12 +522,6 @@ impl View {
         }
     }
 
-    /// Tells the parent about something the user asked for that the view
-    /// cannot do by itself.
-    unsafe fn wants(&self, what: usize) {
-        PostMessageW(GetParent(self.hwnd), crate::WM_QV_WANT, what, self.tab as isize);
-    }
-
     unsafe fn on_key(&mut self, vk: u32) -> bool {
         let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
         let page = self.model.rows().max(2) as isize - 1;
@@ -535,14 +535,6 @@ impl View {
             VK_END => self.follow(),
             k if ctrl && k == b'C' as u16 => self.copy(),
             k if ctrl && k == b'A' as u16 => self.select_all(),
-            // Searching is not the view's business: it only tells its
-            // parent what the user asked for, and knows nothing of how
-            // the parent goes about it.
-            k if ctrl && k == b'F' as u16 => self.wants(crate::WANT_FIND_BOX),
-            VK_F3 => {
-                let newer = GetKeyState(VK_SHIFT as i32) < 0;
-                self.wants(if newer { crate::WANT_FIND_NEWER } else { crate::WANT_FIND_OLDER });
-            }
             _ => return false,
         }
         true
