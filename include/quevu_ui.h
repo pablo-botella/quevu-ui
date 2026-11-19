@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 /* Version of this interface, as returned by quevu_ui_abi. */
-#define QUEVU_UI_ABI 3u
+#define QUEVU_UI_ABI 4u
 
 /* Operations of a feed: what a console asks for and what it is given. */
 #define QUEVU_OP_LIVE   1u /* new chunks, while the console follows      */
@@ -135,8 +135,9 @@ void quevu_ui_console_note(uint32_t tab, const char *note);
  * and shows how it went.
  *
  * On QUEVU_EV_CONSOLE_FIND the host reads the text with
- * quevu_ui_console_find_text, searches from ev.seq in the direction of
- * ev.op, and answers with quevu_ui_console_goto if it found a line, and
+ * quevu_ui_console_find_text and the time range, if the user set one,
+ * with quevu_ui_console_find_range, searches from ev.seq in the direction
+ * of ev.op, and answers with quevu_ui_console_goto if it found a line, and
  * with quevu_ui_console_find_status either way.
  */
 
@@ -146,6 +147,14 @@ void quevu_ui_console_note(uint32_t tab, const char *note);
  * the whole text, which may be larger than what fitted.
  */
 uint32_t quevu_ui_console_find_text(uint32_t tab, char *buf, uint32_t cap);
+
+/*
+ * Reads the time range the console of a tab is searching within:
+ * nanoseconds since the Unix epoch, with zero for no bound on that side.
+ * Either pointer may be null.
+ */
+void quevu_ui_console_find_range(uint32_t tab, int64_t *since_ns,
+                                 int64_t *until_ns);
 
 /*
  * Moves a console to a line a search found: the line at position mark is

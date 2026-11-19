@@ -27,6 +27,7 @@ Described in full in `include/quevu_ui.h`. Its rules:
 | `quevu_ui_console_deliver` | What came down the data lane of a console |
 | `quevu_ui_console_note` | A note next to the state of a console (its queues) |
 | `quevu_ui_console_find_text` | The text a console is looking for |
+| `quevu_ui_console_find_range` | The range of time it is looking within |
 | `quevu_ui_console_goto` | Moves a console to the lines around something found |
 | `quevu_ui_console_find_status` | How a step of a search went |
 | `quevu_ui_menu_add` | An entry in the application menu |
@@ -80,6 +81,12 @@ never runs to the end of a log of millions of lines by itself:
 
 The next step starts from the line last found, or, if there is none, from
 the edge of what is on screen.
+
+The button with three dots next to the arrows folds out the rest of what
+a search can be given. For now that is a range of time: a *From* and a
+*To*, each with a box to tick; unticked, that side has no bound. The range
+counts only while the row is open, so a bound nobody can see never
+narrows a search. The host reads it with `quevu_ui_console_find_range`.
 
 **History.** The console escalates in three steps: its own memory, recent
 output, and the history. The first two are automatic. When recent output

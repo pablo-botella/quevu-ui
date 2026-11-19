@@ -19,10 +19,13 @@ use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
 use quevu_ui_core::console::Status;
-use quevu_ui_core::shared::{event, Command, Event, Shared};
+use quevu_ui_core::shared::{event, Command, Event, FindParams, Shared};
 use quevu_ui_core::UnitState;
 
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    FILETIME, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
+};
+use windows_sys::Win32::System::Time::{SystemTimeToFileTime, TzSpecificLocalTimeToSystemTime};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontIndirectW, CreateFontW, DeleteObject, GetDC, GetSysColorBrush, GetTextMetricsW,
     ReleaseDC, SelectObject, SetBkMode, SetTextColor, COLOR_BTNFACE, COLOR_WINDOW, HFONT, TEXTMETRICW, TRANSPARENT,
@@ -84,6 +87,8 @@ const GLYPH_PLAY: &str = "\u{e768}";
 // Chevrons, for walking through the matches of a search.
 const GLYPH_UP: &str = "\u{e70e}";
 const GLYPH_DOWN: &str = "\u{e70d}";
+// "More": opens the rest of what a search can be given.
+const GLYPH_MORE: &str = "\u{e712}";
 
 // Styles of the STATIC control.
 const SS_NOPREFIX: u32 = 0x80;
@@ -102,6 +107,16 @@ const ID_FIND: u32 = 114;
 const ID_FIND_OLDER: u32 = 115;
 const ID_FIND_NEWER: u32 = 116;
 const ID_HISTORY: u32 = 117;
+const ID_MORE: u32 = 118;
+
+// The date and time picker control.
+const DTS_SHOWNONE: u32 = 0x2;
+const DTM_GETSYSTEMTIME: u32 = 0x1001;
+const DTM_SETSYSTEMTIME: u32 = 0x1002;
+const DTM_SETFORMATW: u32 = 0x1032;
+const GDT_VALID: isize = 0;
+const GDT_NONE: usize = 1;
+const ICC_DATE_CLASSES: u32 = 0x100;
 // What a dialog-style window gets for Enter and Escape.
 const ID_ENTER: u32 = 1;
 const ID_ESCAPE: u32 = 2;
@@ -140,6 +155,9 @@ struct Tab {
     find_offer: bool,
     /// The user allowed searches of this console into the history.
     find_history: bool,
+    /// The time range of the last search, to tell "the same thing".
+    last_since: i64,
+    last_until: i64,
     /// Whether the console was following the last time it was looked at.
     was_following: bool,
 }
@@ -163,6 +181,13 @@ struct App {
     find_edit: HWND,
     find_older: HWND,
     find_newer: HWND,
+    find_more: HWND,
+    /// The rest of the search: a range of time, in a row that folds away.
+    range_open: bool,
+    from_label: HWND,
+    from_pick: HWND,
+    to_label: HWND,
+    to_pick: HWND,
     history: HWND,
     units: Vec<Unit>,
     tabs: Vec<Tab>,
@@ -190,7 +215,7 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
 
     let icc = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_TAB_CLASSES,
+        dwICC: ICC_TAB_CLASSES | ICC_DATE_CLASSES,
     };
     InitCommonControlsEx(&icc);
 
@@ -259,6 +284,12 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         find_edit: null_mut(),
         find_older: null_mut(),
         find_newer: null_mut(),
+        find_more: null_mut(),
+        range_open: false,
+        from_label: null_mut(),
+        from_pick: null_mut(),
+        to_label: null_mut(),
+        to_pick: null_mut(),
         history: null_mut(),
         units: Vec::new(),
         tabs: Vec::new(),
@@ -369,6 +400,25 @@ impl Drop for Themed {
             ReleaseActCtx(self.ctx);
         }
     }
+}
+
+/// The time a picker holds, as nanoseconds since the Unix epoch, or zero
+/// if its box is not ticked.
+unsafe fn picked(h: HWND) -> i64 {
+    let mut local: SYSTEMTIME = zeroed();
+    if SendMessageW(h, DTM_GETSYSTEMTIME, 0, &mut local as *mut SYSTEMTIME as LPARAM) != GDT_VALID {
+        return 0;
+    }
+    // The user thinks in the time of the machine; chunks are stamped in
+    // universal time.
+    let mut utc: SYSTEMTIME = zeroed();
+    let mut ft: FILETIME = zeroed();
+    if TzSpecificLocalTimeToSystemTime(null(), &local, &mut utc) == 0 || SystemTimeToFileTime(&utc, &mut ft) == 0 {
+        return 0;
+    }
+    // Windows counts in units of 100 ns from 1601.
+    let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+    (ticks as i64 - 116_444_736_000_000_000) * 100
 }
 
 impl App {
@@ -512,6 +562,24 @@ impl App {
             SendMessageW(h, WM_SETFONT, self.font_icon as usize, 1);
             ShowWindow(h, SW_HIDE);
         }
+        // What else a search can be given lives in a row that folds away:
+        // for now, a range of time. Each end has a box to tick; unticked,
+        // that side has no bound.
+        self.find_more = self.child("BUTTON", GLYPH_MORE, BS_PUSHBUTTON as u32, ID_MORE);
+        SendMessageW(self.find_more, WM_SETFONT, self.font_icon as usize, 1);
+        self.from_label = self.child("STATIC", "From", SS_NOPREFIX, 0);
+        self.from_pick = self.child("SysDateTimePick32", "", DTS_SHOWNONE | WS_TABSTOP, 0);
+        self.to_label = self.child("STATIC", "To", SS_NOPREFIX, 0);
+        self.to_pick = self.child("SysDateTimePick32", "", DTS_SHOWNONE | WS_TABSTOP, 0);
+        let format = wide("yyyy'-'MM'-'dd  HH':'mm':'ss");
+        for h in [self.from_pick, self.to_pick] {
+            SendMessageW(h, DTM_SETFORMATW, 0, format.as_ptr() as LPARAM);
+            // Unticked to begin with: no bound.
+            SendMessageW(h, DTM_SETSYSTEMTIME, GDT_NONE, 0);
+        }
+        for h in [self.find_more, self.from_label, self.from_pick, self.to_label, self.to_pick] {
+            ShowWindow(h, SW_HIDE);
+        }
         // The one way into the history. It shows up only when there is a
         // history to offer, and nothing goes there until it is pressed.
         self.history = self.child("BUTTON", "History", BS_PUSHBUTTON as u32, ID_HISTORY);
@@ -535,9 +603,10 @@ impl App {
         // One row of tabs across the whole window: the switches are the
         // first tab, the screens are the rest.
         let strip_h = self.s(36);
+        let range_h = if self.range_open { self.s(34) } else { 0 };
         let tx = pad;
         let tw = (w - pad * 2).max(0);
-        let th = (h - strip_h - pad).max(0);
+        let th = (h - strip_h - range_h - pad).max(0);
         MoveWindow(self.tabs_ctl, tx, pad, tw, th, 1);
         let mut area = RECT { left: 0, top: 0, right: tw, bottom: th };
         // Asks the tab control how much of itself is left for content.
@@ -583,14 +652,24 @@ impl App {
         MoveWindow(self.toggle, tx + tw - side - self.s(2), pad, side, side, 1);
         SetWindowPos(self.toggle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-        let sy = pad + th + (strip_h - bh) / 2;
+        let sy = pad + th + range_h + (strip_h - bh) / 2;
         let fb = self.s(26);
         let fw = self.s(260).min(tw / 3);
         let right = tx + tw;
-        MoveWindow(self.find_newer, right - fb, sy + self.s(1), fb, fb, 1);
-        MoveWindow(self.find_older, right - fb * 2 - self.s(2), sy + self.s(1), fb, fb, 1);
+        MoveWindow(self.find_more, right - fb, sy + self.s(1), fb, fb, 1);
+        MoveWindow(self.find_newer, right - fb * 2 - self.s(2), sy + self.s(1), fb, fb, 1);
+        MoveWindow(self.find_older, right - fb * 3 - self.s(4), sy + self.s(1), fb, fb, 1);
+        // The folding row sits between the console and the strip, under
+        // the search box it belongs to.
+        let ry = pad + th + self.s(6);
+        let pw = self.s(196);
+        let ph = self.s(24);
+        MoveWindow(self.to_pick, right - pw, ry, pw, ph, 1);
+        MoveWindow(self.to_label, right - pw - self.s(28), ry + self.s(3), self.s(24), self.s(18), 1);
+        MoveWindow(self.from_pick, right - pw * 2 - self.s(44), ry, pw, ph, 1);
+        MoveWindow(self.from_label, right - pw * 2 - self.s(86), ry + self.s(3), self.s(38), self.s(18), 1);
         let hw = self.s(76);
-        let used = fw + fb * 2 + self.s(8);
+        let used = fw + fb * 3 + self.s(10);
         MoveWindow(self.find_edit, right - used, sy + self.s(2), fw, self.s(24), 1);
         MoveWindow(self.history, right - used - hw - pad, sy + self.s(1), hw, fb, 1);
         let taken = used + hw + pad * 3;
@@ -619,8 +698,12 @@ impl App {
         }
         // The transport button belongs to the consoles.
         ShowWindow(self.toggle, if cur.is_some() { SW_SHOW } else { SW_HIDE });
-        for h in [self.find_edit, self.find_older, self.find_newer] {
+        for h in [self.find_edit, self.find_older, self.find_newer, self.find_more] {
             ShowWindow(h, if cur.is_some() { SW_SHOW } else { SW_HIDE });
+        }
+        let range = cur.is_some() && self.range_open;
+        for h in [self.from_label, self.from_pick, self.to_label, self.to_pick] {
+            ShowWindow(h, if range { SW_SHOW } else { SW_HIDE });
         }
         if let Some(i) = cur {
             if self.tabs[i].unseen {
@@ -778,6 +861,8 @@ impl App {
                     last_newer: false,
                     find_offer: false,
                     find_history: false,
+                    last_since: 0,
+                    last_until: 0,
                     was_following: false,
                 });
                 if self.show_time {
@@ -926,10 +1011,22 @@ impl App {
             SetFocus(self.find_edit);
             return;
         }
+        // The range counts only while its row is open: a bound nobody
+        // can see must not narrow a search behind the user's back.
+        let (since, until) = if self.range_open {
+            let until = picked(self.to_pick);
+            // The picker counts in seconds: the whole second is inside.
+            (picked(self.from_pick), if until != 0 { until + 999_999_999 } else { 0 })
+        } else {
+            (0, 0)
+        };
         let tab = &mut self.tabs[i];
         // The same question again after a step that ran out of budget
         // goes on from where that step stopped.
-        let from = if tab.find_resume != 0 && tab.last_query == text && tab.last_newer == newer {
+        let same = tab.last_query == text && tab.last_newer == newer && tab.last_since == since && tab.last_until == until;
+        tab.last_since = since;
+        tab.last_until = until;
+        let from = if tab.find_resume != 0 && same {
             tab.find_resume
         } else {
             view::of(tab.view).map(|v| v.find_from(newer)).unwrap_or(0)
@@ -944,7 +1041,7 @@ impl App {
         // scrolling into it or by accepting it for a search.
         let history = tab.find_history || view::of(tab.view).map(|v| v.in_history()).unwrap_or(false);
         let op = newer as u32 | if history { 2 } else { 0 };
-        self.shared.set_find_text(id, text);
+        self.shared.set_find(id, FindParams { text, since_ns: since, until_ns: until });
         self.shared.emit(Event { kind: event::CONSOLE_FIND, id, op, n: 0, seq: from });
         self.refresh_strip();
     }
@@ -955,6 +1052,15 @@ impl App {
                 if self.current().is_some() {
                     SetFocus(self.find_edit);
                     SendMessageW(self.find_edit, EM_SETSEL, 0, -1);
+                }
+            }
+            ID_MORE => {
+                // Folds the rest of the search out, or away.
+                self.range_open = !self.range_open;
+                self.layout();
+                self.show_current();
+                if let Some(i) = self.current() {
+                    SetFocus(if self.range_open { self.from_pick } else { self.tabs[i].view });
                 }
             }
             ID_HISTORY => {
@@ -1089,10 +1195,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DPICHANGED => {
             app.dpi = hiword(wparam).max(96);
             app.make_fonts();
-            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit, app.history] {
+            for h in [
+                app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit, app.history,
+                app.from_label, app.from_pick, app.to_label, app.to_pick,
+            ] {
                 SendMessageW(h, WM_SETFONT, app.font_ui as usize, 1);
             }
-            for h in [app.toggle, app.find_older, app.find_newer] {
+            for h in [app.toggle, app.find_older, app.find_newer, app.find_more] {
                 SendMessageW(h, WM_SETFONT, app.font_icon as usize, 1);
             }
             for u in &app.units {

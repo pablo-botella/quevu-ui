@@ -25,7 +25,7 @@ use quevu_ui_core::text::display_line;
 use quevu_ui_core::UnitState;
 
 /// Version of this interface. A host checks it before anything else.
-pub const QUEVU_UI_ABI: u32 = 3;
+pub const QUEVU_UI_ABI: u32 = 4;
 
 /// Flag of a delivery: the source paused the console by itself.
 pub const QUEVU_FLAG_FULL: u32 = 1;
@@ -194,6 +194,24 @@ pub unsafe extern "C" fn quevu_ui_console_find_text(tab: u32, buf: *mut u8, cap:
         *buf.add(n) = 0;
     }
     bytes.len() as u32
+}
+
+/// Reads the time range the console of a tab is searching within, after a
+/// console find event: nanoseconds since the Unix epoch, with zero for no
+/// bound on that side.
+///
+/// # Safety
+/// `since_ns` and `until_ns` must each be null or point to writable
+/// memory for one value.
+#[no_mangle]
+pub unsafe extern "C" fn quevu_ui_console_find_range(tab: u32, since_ns: *mut i64, until_ns: *mut i64) {
+    let p = shared().find(tab);
+    if !since_ns.is_null() {
+        *since_ns = p.since_ns;
+    }
+    if !until_ns.is_null() {
+        *until_ns = p.until_ns;
+    }
 }
 
 /// Moves a console to the lines around something a search found: the

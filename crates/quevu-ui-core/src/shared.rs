@@ -84,6 +84,17 @@ pub mod event {
     pub const CONSOLE_FIND: u32 = 9;
 }
 
+/// What a console is looking for. Events are fixed in size, so this waits
+/// in [`Shared`] for the host to read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindParams {
+    pub text: String,
+    /// The time range, in nanoseconds since the Unix epoch. Zero is no
+    /// bound on that side.
+    pub since_ns: i64,
+    pub until_ns: i64,
+}
+
 /// Something the user did, on its way to the host.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,7 +140,7 @@ pub struct Shared {
     events: Mutex<Events>,
     arrived: Condvar,
     next_id: AtomicU32,
-    finds: Mutex<HashMap<u32, String>>,
+    finds: Mutex<HashMap<u32, FindParams>>,
 }
 
 impl Default for Shared {
@@ -185,12 +196,17 @@ impl Shared {
 
     /// UI side: the text the console of a tab is looking for. Events are
     /// fixed in size, so the text waits here for the host to read it.
-    pub fn set_find_text(&self, tab: u32, text: String) {
-        self.finds.lock().unwrap().insert(tab, text);
+    pub fn set_find(&self, tab: u32, params: FindParams) {
+        self.finds.lock().unwrap().insert(tab, params);
     }
 
     /// Host side: the text the console of a tab is looking for.
     pub fn find_text(&self, tab: u32) -> String {
+        self.find(tab).text
+    }
+
+    /// Host side: everything the console of a tab is looking for.
+    pub fn find(&self, tab: u32) -> FindParams {
         self.finds.lock().unwrap().get(&tab).cloned().unwrap_or_default()
     }
 
