@@ -41,13 +41,15 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_SHIFT,
+};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect, GetCursorPos, GetMessageW,
+    DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect, GetCursorPos, GetMessageW, GetWindowTextW,
     IsDialogMessageW, IsWindowVisible, LoadCursorW, LoadIconW, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, SetMenu, SetWindowPos,
     SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BS_PUSHBUTTON,
@@ -57,7 +59,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
     TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
     WM_LBUTTONDBLCLK, WM_NCDESTROY, WM_NOTIFY, WM_NULL, WM_RBUTTONUP, WM_SETFONT, WM_SIZE,
-    WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
+    WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT,
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
@@ -69,6 +71,12 @@ const WM_QV_WAKE: u32 = WM_APP + 1;
 pub(crate) const WM_QV_STATE: u32 = WM_APP + 2;
 /// Something happened to the icon in the notification area.
 const WM_QV_TRAY: u32 = WM_APP + 3;
+/// A console view reports something the user asked for that is not the
+/// view's to do. `wparam` says what; `lparam` is the tab.
+pub(crate) const WM_QV_WANT: u32 = WM_APP + 4;
+pub(crate) const WANT_FIND_BOX: usize = 1;
+pub(crate) const WANT_FIND_OLDER: usize = 2;
+pub(crate) const WANT_FIND_NEWER: usize = 3;
 
 const CLASS: &str = "QuevuPanelWindow";
 /// The plain background of the page of switches: a window that does
@@ -92,6 +100,17 @@ const ID_TOGGLE: u32 = 110;
 const ID_COPY: u32 = 111;
 const ID_OPEN: u32 = 112;
 const ID_TIME: u32 = 113;
+const ID_FIND: u32 = 114;
+const ID_FIND_OLDER: u32 = 115;
+const ID_FIND_NEWER: u32 = 116;
+// What a dialog-style window gets for Enter and Escape.
+const ID_ENTER: u32 = 1;
+const ID_ESCAPE: u32 = 2;
+
+// Styles and messages of the EDIT control.
+const ES_AUTOHSCROLL: u32 = 0x80;
+const EM_SETSEL: u32 = 0xb1;
+const EM_SETCUEBANNER: u32 = 0x1501;
 const ID_UNIT_BASE: u32 = 1000;
 const ID_MENU_BASE: u32 = 5000;
 
@@ -111,6 +130,13 @@ struct Tab {
     note: String,
     /// Output arrived while another tab was in front.
     unseen: bool,
+    /// How the last step of a search went, shown in the strip.
+    find_status: String,
+    /// Where the next step starts if the same thing is asked again, and
+    /// what "the same thing" is.
+    find_resume: u64,
+    last_query: String,
+    last_newer: bool,
 }
 
 struct App {
@@ -129,6 +155,7 @@ struct App {
     page: HWND,
     strip: HWND,
     toggle: HWND,
+    find_edit: HWND,
     units: Vec<Unit>,
     tabs: Vec<Tab>,
     app_menu: HMENU,
@@ -221,6 +248,7 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         page: null_mut(),
         strip: null_mut(),
         toggle: null_mut(),
+        find_edit: null_mut(),
         units: Vec::new(),
         tabs: Vec::new(),
         app_menu: null_mut(),
@@ -401,6 +429,10 @@ impl App {
         AppendMenuW(console, MF_STRING, ID_TOGGLE as usize, wide("&Hold / follow the output\tEnd").as_ptr());
         AppendMenuW(console, MF_STRING, ID_COPY as usize, wide("&Copy\tCtrl+C").as_ptr());
         AppendMenuW(console, MF_SEPARATOR, 0, null());
+        AppendMenuW(console, MF_STRING, ID_FIND as usize, wide("&Find...\tCtrl+F").as_ptr());
+        AppendMenuW(console, MF_STRING, ID_FIND_OLDER as usize, wide("Find &older\tF3").as_ptr());
+        AppendMenuW(console, MF_STRING, ID_FIND_NEWER as usize, wide("Find &newer\tShift+F3").as_ptr());
+        AppendMenuW(console, MF_SEPARATOR, 0, null());
         AppendMenuW(console, MF_STRING, ID_TIME as usize, wide("Show the &time of each line").as_ptr());
         self.console_menu = console;
         AppendMenuW(bar, MF_POPUP, console as usize, wide("&Console").as_ptr());
@@ -424,6 +456,26 @@ impl App {
         self.toggle = self.child("BUTTON", GLYPH_PAUSE, BS_PUSHBUTTON as u32 | WS_TABSTOP | WS_CLIPSIBLINGS, ID_TOGGLE);
         SendMessageW(self.toggle, WM_SETFONT, self.font_icon as usize, 1);
         EnableWindow(self.toggle, 0);
+        // The box a search is typed in. It needs a border of its own,
+        // hence not through child().
+        let edit_class = wide("EDIT");
+        self.find_edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            edit_class.as_ptr(),
+            null(),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            0,
+            0,
+            self.hwnd,
+            null_mut(),
+            self.hinst,
+            null(),
+        );
+        SendMessageW(self.find_edit, WM_SETFONT, self.font_ui as usize, 1);
+        let cue = wide("Find in this log (Enter: older, Shift+Enter: newer)");
+        SendMessageW(self.find_edit, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
         // Pin the stacking order instead of trusting the order of
         // creation: the tab control at the very bottom, the background of
         // the page right above it, everything else over both.
@@ -492,7 +544,9 @@ impl App {
         SetWindowPos(self.toggle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
         let sy = pad + th + (strip_h - bh) / 2;
-        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - pad).max(0), self.s(18), 1);
+        let fw = self.s(330).min(tw / 2);
+        MoveWindow(self.find_edit, tx + tw - fw, sy + self.s(2), fw, self.s(24), 1);
+        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - fw - pad * 2).max(0), self.s(18), 1);
         let _ = w;
     }
 
@@ -517,6 +571,7 @@ impl App {
         }
         // The transport button belongs to the consoles.
         ShowWindow(self.toggle, if cur.is_some() { SW_SHOW } else { SW_HIDE });
+        ShowWindow(self.find_edit, if cur.is_some() { SW_SHOW } else { SW_HIDE });
         if let Some(i) = cur {
             if self.tabs[i].unseen {
                 self.tabs[i].unseen = false;
@@ -570,8 +625,13 @@ impl App {
             EnableWindow(self.toggle, 0);
             return;
         };
+        let status = view::of(self.tabs[i].view).map(|v| v.status()).unwrap_or(Status::Waiting);
+        if status == Status::Following {
+            // Back on the live output: the search is over.
+            self.tabs[i].find_status.clear();
+            self.tabs[i].find_resume = 0;
+        }
         let tab = &self.tabs[i];
-        let status = view::of(tab.view).map(|v| v.status()).unwrap_or(Status::Waiting);
         // The button shows what pressing it does, as on a tape deck. The
         // text says in words that only the view is held: the application
         // and its log go on.
@@ -581,8 +641,9 @@ impl App {
             Status::Paused => ("View held (the application keeps running). Press play or End to follow the live output", GLYPH_PLAY),
             Status::PausedFull => ("View held: it fell behind and stopped receiving (the application keeps running). Play jumps to the end", GLYPH_PLAY),
         };
-        let mut line = text.to_string();
-        if !tab.note.is_empty() {
+        // While a search is going on, the strip tells how it went.
+        let mut line = if tab.find_status.is_empty() { text.to_string() } else { tab.find_status.clone() };
+        if tab.find_status.is_empty() && !tab.note.is_empty() {
             line.push_str("   |   ");
             line.push_str(&tab.note);
         }
@@ -642,7 +703,14 @@ impl App {
                 // After the page of switches and the consoles already there.
                 let at = self.tabs.len() + 1;
                 SendMessageW(self.tabs_ctl, TCM_INSERTITEMW, at, &item as *const TCITEMW as LPARAM);
-                self.tabs.push(Tab { id, view, title, note: String::new(), unseen: false });
+                self.tabs.push(Tab { id, view, title,
+                    note: String::new(),
+                    unseen: false,
+                    find_status: String::new(),
+                    find_resume: 0,
+                    last_query: String::new(),
+                    last_newer: false,
+                });
                 if self.show_time {
                     if let Some(v) = view::of(view) {
                         v.set_show_time(true);
@@ -672,6 +740,20 @@ impl App {
             Command::ConsoleNote { tab, text } => {
                 if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
                     t.note = text;
+                }
+                self.refresh_strip();
+            }
+            Command::Goto { tab, lines, mark } => {
+                if let Some(t) = self.tabs.iter().find(|t| t.id == tab) {
+                    if let Some(v) = view::of(t.view) {
+                        v.goto(lines, mark);
+                    }
+                }
+            }
+            Command::FindStatus { tab, text, resume } => {
+                if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
+                    t.find_status = text;
+                    t.find_resume = resume;
                 }
                 self.refresh_strip();
             }
@@ -762,8 +844,56 @@ impl App {
         DestroyMenu(menu);
     }
 
+    /// Asks the host for one step of a search in the console in front.
+    /// A search never runs here, and never runs to the end of the log by
+    /// itself: each step is bounded, and going on is the user's choice.
+    unsafe fn find(&mut self, newer: bool) {
+        let Some(i) = self.current() else { return };
+        let mut buf = [0u16; 512];
+        let n = GetWindowTextW(self.find_edit, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
+        let text = String::from_utf16_lossy(&buf[..n]);
+        if text.trim().is_empty() {
+            SetFocus(self.find_edit);
+            return;
+        }
+        let tab = &mut self.tabs[i];
+        // The same question again after a step that ran out of budget
+        // goes on from where that step stopped.
+        let from = if tab.find_resume != 0 && tab.last_query == text && tab.last_newer == newer {
+            tab.find_resume
+        } else {
+            view::of(tab.view).map(|v| v.find_from(newer)).unwrap_or(0)
+        };
+        tab.last_query = text.clone();
+        tab.last_newer = newer;
+        tab.find_resume = 0;
+        tab.find_status = format!("Looking for \"{text}\"...");
+        let id = tab.id;
+        self.shared.set_find_text(id, text);
+        self.shared.emit(Event { kind: event::CONSOLE_FIND, id, op: newer as u32, n: 0, seq: from });
+        self.refresh_strip();
+    }
+
     unsafe fn command(&mut self, id: u32) {
         match id {
+            ID_FIND => {
+                if self.current().is_some() {
+                    SetFocus(self.find_edit);
+                    SendMessageW(self.find_edit, EM_SETSEL, 0, -1);
+                }
+            }
+            ID_FIND_OLDER => self.find(false),
+            ID_FIND_NEWER => self.find(true),
+            // Enter and Escape reach the window as commands. They mean
+            // something only while the search box has the keyboard.
+            ID_ENTER if GetFocus() == self.find_edit => {
+                self.find(GetKeyState(VK_SHIFT as i32) < 0);
+            }
+            ID_ESCAPE if GetFocus() == self.find_edit => {
+                if let Some(i) = self.current() {
+                    SetFocus(self.tabs[i].view);
+                }
+            }
             ID_START_ALL => self.shared.emit(Event::simple(event::START_ALL, 0)),
             ID_STOP_ALL => self.shared.emit(Event::simple(event::STOP_ALL, 0)),
             ID_EXIT => self.shared.emit(Event::simple(event::CLOSE, 0)),
@@ -841,6 +971,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
+        WM_QV_WANT => {
+            // What the view asked for is done the same way the menu does.
+            match wparam {
+                WANT_FIND_BOX => app.command(ID_FIND),
+                WANT_FIND_OLDER => app.command(ID_FIND_OLDER),
+                WANT_FIND_NEWER => app.command(ID_FIND_NEWER),
+                _ => {}
+            }
+            0
+        }
         WM_QV_TRAY => {
             match loword(lparam as usize) {
                 WM_LBUTTONDBLCLK => app.restore(),
@@ -861,7 +1001,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DPICHANGED => {
             app.dpi = hiword(wparam).max(96);
             app.make_fonts();
-            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip] {
+            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit] {
                 SendMessageW(h, WM_SETFONT, app.font_ui as usize, 1);
             }
             SendMessageW(app.toggle, WM_SETFONT, app.font_icon as usize, 1);

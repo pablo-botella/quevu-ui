@@ -66,12 +66,15 @@ Described in full in `include/quevu_ui.h`. Its rules:
 | `quevu_ui_console_add`, `quevu_ui_tab_remove` | A tab with a pseudo-console |
 | `quevu_ui_console_deliver` | What came down the data lane of a console |
 | `quevu_ui_console_note` | A note next to the state of a console (its queues) |
+| `quevu_ui_console_find_text` | The text a console is looking for |
+| `quevu_ui_console_goto` | Moves a console to the lines around something found |
+| `quevu_ui_console_find_status` | How a step of a search went |
 | `quevu_ui_menu_add` | An entry in the application menu |
 | `quevu_ui_tray`, `quevu_ui_show` | The notification area icon; showing and hiding |
 | `quevu_ui_next_event` | The next thing the user did |
 
 Events: `READY`, `UNIT_START`, `UNIT_STOP`, `START_ALL`, `STOP_ALL`,
-`CONSOLE_REQUEST`, `MENU`, `CLOSE`.
+`CONSOLE_REQUEST`, `MENU`, `CLOSE`, `CONSOLE_FIND`.
 
 The window decides nothing. A switch only reports that the user flipped
 it; the host starts or stops the unit and reports the new state back.
@@ -96,8 +99,27 @@ position, 300 chunks at a time, with `CONSOLE_REQUEST` events.
 - Where positions jump, a line says how many chunks were not kept.
 
 Keys: arrows and Page Up/Down scroll, Home goes to the top of the window,
-End resumes, Ctrl+A selects all, Ctrl+C copies. Shift+wheel scrolls
-sideways.
+End resumes, Ctrl+A selects all, Ctrl+C copies, Ctrl+F goes to the search
+box, F3 and Shift+F3 look for the next older and newer match. Shift+wheel
+scrolls sideways.
+
+**Searching.** The window never searches. It asks the host for one step
+(`CONSOLE_FIND`: a text, a position to start from, a direction) and shows
+what comes back. A step examines a bounded stretch of the log, so a search
+never runs to the end of a log of millions of lines by itself:
+
+- found: the console moves to the lines around the match, holds the view
+  and tells the line apart;
+- not found within the stretch: the strip says how far the step got, and
+  asking for the same text again goes on from there;
+- not found and nothing further: the strip says so.
+
+The next step starts from the line last found, or, if there is none, from
+the edge of what is on screen.
+
+**Time.** *Console > Show the time of each line* adds a margin with the
+local time each chunk entered its log. The margin is not part of the text:
+it is never selected or copied.
 
 A chunk is always exactly one line: tabs are expanded and control
 characters become a middle dot.
@@ -110,8 +132,10 @@ selection or a copy never contains an escape code. Color does not carry
 over from one chunk to the next.
 
 **Layout.** One row of tabs across the window. The first tab, *Units*,
-holds the switches: the global one and a row per unit with its state and,
-if it failed, the whole error. Every other tab is a console.
+holds the switches: the global one and a row per unit with its state (in
+color: running, in transit, stopped, failed) and, if it failed, the whole
+error. Every other tab is a console; a dot on its title means it holds
+output nobody has looked at.
 
 The transport button is a small pause/play mark at the right end of the
 tab row, as on a tape deck, and shows what pressing it does. It sits on
@@ -158,6 +182,9 @@ is already tested; a backend only draws and reports.
   decide those things for its host.
 - **`unsafe` is confined** to the Win32 backend and the C door. The core
   has none.
+- **The console view is a layer below the window** and knows nothing of
+  it: what it cannot do itself (a search) it reports upwards as a wish,
+  and the window decides what that means.
 - **Window state hangs from the window** (`GWLP_USERDATA`), the same job a
   `void *context` does in C. A reference to it must not be kept across a
   call that can run another window procedure.

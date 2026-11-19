@@ -25,7 +25,7 @@ use quevu_ui_core::text::display_line;
 use quevu_ui_core::UnitState;
 
 /// Version of this interface. A host checks it before anything else.
-pub const QUEVU_UI_ABI: u32 = 1;
+pub const QUEVU_UI_ABI: u32 = 2;
 
 /// A chunk as the host hands it over. The data is copied before the call
 /// returns.
@@ -61,6 +61,23 @@ fn backend_run(title: &str) -> i32 {
 fn backend_run(_title: &str) -> i32 {
     // No backend for this system yet.
     -1
+}
+
+/// Copies the chunks the host hands over into lines a console can draw.
+unsafe fn lines_from(chunks: *const QuevuUiChunk, n: u32) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(n as usize);
+    if !chunks.is_null() {
+        for c in std::slice::from_raw_parts(chunks, n as usize) {
+            let data: &[u8] = if c.data.is_null() || c.len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(c.data, c.len as usize)
+            };
+            let (text, spans) = display_line(data);
+            lines.push(Line { seq: c.seq, time_ns: c.time_ns, text, spans });
+        }
+    }
+    lines
 }
 
 /// Returns the version of the interface this library implements.
@@ -134,19 +151,7 @@ pub unsafe extern "C" fn quevu_ui_console_deliver(
     chunks: *const QuevuUiChunk,
     n: u32,
 ) {
-    let mut lines = Vec::with_capacity(n as usize);
-    if !chunks.is_null() {
-        for c in std::slice::from_raw_parts(chunks, n as usize) {
-            let data: &[u8] = if c.data.is_null() || c.len == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(c.data, c.len as usize)
-            };
-            let (text, spans) = display_line(data);
-            lines.push(Line { seq: c.seq, time_ns: c.time_ns, text, spans });
-        }
-    }
-    shared().post(Command::Deliver { tab, op, full: full != 0, lines });
+    shared().post(Command::Deliver { tab, op, full: full != 0, lines: lines_from(chunks, n) });
 }
 
 /// Sets the note shown in the status strip of a console, next to its
@@ -157,6 +162,47 @@ pub unsafe extern "C" fn quevu_ui_console_deliver(
 #[no_mangle]
 pub unsafe extern "C" fn quevu_ui_console_note(tab: u32, note: *const c_char) {
     shared().post(Command::ConsoleNote { tab, text: text(note) });
+}
+
+/// Reads the text the console of a tab is looking for, after a console
+/// find event. Copies at most `cap - 1` bytes of UTF-8 plus a NUL into
+/// `buf` and returns the length of the whole text, which may be larger.
+///
+/// # Safety
+/// `buf` must point to `cap` writable bytes; it may be null when `cap`
+/// is zero.
+#[no_mangle]
+pub unsafe extern "C" fn quevu_ui_console_find_text(tab: u32, buf: *mut u8, cap: u32) -> u32 {
+    let text = shared().find_text(tab);
+    let bytes = text.as_bytes();
+    if !buf.is_null() && cap > 0 {
+        let n = bytes.len().min(cap as usize - 1);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+    }
+    bytes.len() as u32
+}
+
+/// Moves a console to the lines around something a search found: the
+/// window is replaced by `chunks`, the view is held, and the line at
+/// position `mark` is told apart.
+///
+/// # Safety
+/// As for `quevu_ui_console_deliver`.
+#[no_mangle]
+pub unsafe extern "C" fn quevu_ui_console_goto(tab: u32, chunks: *const QuevuUiChunk, n: u32, mark: u64) {
+    shared().post(Command::Goto { tab, lines: lines_from(chunks, n), mark });
+}
+
+/// Tells the user how a step of a search went. A non-zero `resume` is
+/// the position the next step should start from if the user asks for the
+/// same text again: the step ran out of budget, not out of log.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn quevu_ui_console_find_status(tab: u32, status: *const c_char, resume: u64) {
+    shared().post(Command::FindStatus { tab, text: text(status), resume });
 }
 
 /// Removes a tab.

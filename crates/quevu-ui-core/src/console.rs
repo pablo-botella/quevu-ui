@@ -75,6 +75,7 @@ pub struct Console {
     top: usize,
     rows: usize,
     origin: i64,
+    mark: Option<u64>,
     status: Status,
     top_exhausted: bool,
     pending_before: bool,
@@ -94,6 +95,7 @@ impl Console {
             top: 0,
             rows: 1,
             origin: 0,
+            mark: None,
             status: Status::Waiting,
             top_exhausted: false,
             pending_before: false,
@@ -117,6 +119,12 @@ impl Console {
     /// a backend anchors a selection to.
     pub fn origin(&self) -> i64 {
         self.origin
+    }
+
+    /// The position of the line a search landed on, to be told apart
+    /// from the rest. Gone at the next follow.
+    pub fn mark(&self) -> Option<u64> {
+        self.mark
     }
 
     /// How many lines fit in the view.
@@ -250,6 +258,45 @@ impl Console {
         }
     }
 
+    /// Where the next step of a search should start. From the line the
+    /// last one landed on, if there is one; otherwise from the edge of
+    /// what is on screen, so that what the user is looking at is searched
+    /// first. Zero, going backwards, means the end of the log.
+    pub fn find_from(&self, forward: bool) -> u64 {
+        if let Some(m) = self.mark {
+            return m;
+        }
+        let mut visible = self.lines.iter().skip(self.top).take(self.rows).filter(|l| !l.is_note());
+        if forward {
+            visible.next().map(|l| l.seq.saturating_sub(1)).unwrap_or(0)
+        } else if self.is_following() {
+            0
+        } else {
+            visible.last().map(|l| l.seq + 1).unwrap_or(0)
+        }
+    }
+
+    /// A search found something somewhere else in the log: the window is
+    /// replaced by the lines around it and the view is held on them, with
+    /// the line found a third of the way down. Returns the request to
+    /// send if the console was following.
+    pub fn goto(&mut self, lines: Vec<Line>, mark: u64) -> Option<Request> {
+        let was_following = self.is_following();
+        self.lines.clear();
+        for c in lines {
+            self.append(c);
+        }
+        self.status = Status::Paused;
+        self.origin = 0;
+        self.top_exhausted = false;
+        self.pending_before = false;
+        self.pending_after = false;
+        self.mark = Some(mark);
+        let at = self.lines.iter().position(|l| l.seq == mark).unwrap_or(0);
+        self.top = at.saturating_sub(self.rows / 3).min(self.max_top());
+        was_following.then_some(Request { op: op::PAUSE, seq: 0, n: 0 })
+    }
+
     /// Something came down the data lane.
     pub fn deliver(&mut self, op: u32, full: bool, chunks: Vec<Line>) {
         match op {
@@ -260,6 +307,7 @@ impl Console {
                 }
                 self.status = Status::Following;
                 self.origin = 0;
+                self.mark = None;
                 self.top_exhausted = false;
                 self.pending_before = false;
                 self.pending_after = false;
@@ -546,6 +594,44 @@ mod tests {
         let addr = c.origin() + 19;
         c.deliver(op::LIVE, false, lines(101, 150));
         assert_eq!(c.lines()[(addr - c.origin()) as usize].seq, 100);
+    }
+
+    #[test]
+    fn a_search_starts_from_what_is_on_screen() {
+        let mut c = started(100);
+        // Following: from the end of the log.
+        assert_eq!(c.find_from(false), 0);
+        // Going forwards: from just before the first visible line.
+        assert_eq!(c.find_from(true), 90);
+        // Held further back: older than the last visible line, inclusive.
+        c.scroll_by(-5);
+        assert_eq!(visible(&c), (86..=95).collect::<Vec<_>>());
+        assert_eq!(c.find_from(false), 96);
+        assert_eq!(c.find_from(true), 85);
+    }
+
+    #[test]
+    fn a_search_result_replaces_the_window_and_holds_it() {
+        let mut c = started(1000);
+        // Found far away: the lines around position 400 arrive.
+        assert_eq!(c.goto(lines(380, 420), 400), Some(Request { op: op::PAUSE, seq: 0, n: 0 }));
+        assert_eq!(c.status(), Status::Paused);
+        assert_eq!(c.mark(), Some(400));
+        assert_eq!(seqs(&c), (380..=420).collect::<Vec<_>>());
+        // The line found sits a third of the way down a view of 10 rows.
+        assert_eq!(visible(&c), (397..=406).collect::<Vec<_>>());
+        // The next step goes on from the line found, in either direction.
+        assert_eq!(c.find_from(false), 400);
+        assert_eq!(c.find_from(true), 400);
+        // Already held: no second pause request.
+        assert_eq!(c.goto(lines(280, 320), 300), None);
+        // The window can grow from there like any other.
+        let reqs = c.scroll_by(-20);
+        assert_eq!(reqs, vec![Request { op: op::BEFORE, seq: 280, n: 20 }]);
+        // Going back to the live output forgets the mark.
+        c.follow();
+        c.deliver(op::FOLLOW, false, lines(981, 1000));
+        assert_eq!(c.mark(), None);
     }
 
     #[test]

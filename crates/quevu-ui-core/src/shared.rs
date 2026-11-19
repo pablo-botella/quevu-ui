@@ -13,7 +13,7 @@
 //! No callbacks cross the boundary, which keeps the C interface trivial
 //! to bind from any language.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -41,6 +41,12 @@ pub enum Command {
     MenuAdd { id: u32, label: String },
     /// Whether closing the window hides it in the system tray.
     Tray { enabled: bool },
+    /// A search found a line: the console moves to the lines around it.
+    Goto { tab: u32, lines: Vec<Line>, mark: u64 },
+    /// What a step of a search has to say. A non-zero `resume` is where
+    /// the next step should start if the user asks for the same thing
+    /// again: the search ran out of budget, not out of log.
+    FindStatus { tab: u32, text: String, resume: u64 },
     /// Shows or hides the window.
     Show { visible: bool },
     /// Ends the event loop.
@@ -66,6 +72,10 @@ pub mod event {
     /// The user asked to close the application. The host decides what
     /// that means and when: usually an orderly stop, then quit.
     pub const CLOSE: u32 = 8;
+    /// The user asked the console of tab `id` to look for a text: `op` is
+    /// 1 to look towards newer output and 0 towards older, `seq` is where
+    /// to start. The text itself is read with [`super::Shared::find_text`].
+    pub const CONSOLE_FIND: u32 = 9;
 }
 
 /// Something the user did, on its way to the host.
@@ -113,6 +123,7 @@ pub struct Shared {
     events: Mutex<Events>,
     arrived: Condvar,
     next_id: AtomicU32,
+    finds: Mutex<HashMap<u32, String>>,
 }
 
 impl Default for Shared {
@@ -129,6 +140,7 @@ impl Shared {
             events: Mutex::new(Events { queue: VecDeque::new(), ended: false }),
             arrived: Condvar::new(),
             next_id: AtomicU32::new(1),
+            finds: Mutex::new(HashMap::new()),
         }
     }
 
@@ -163,6 +175,17 @@ impl Shared {
         *self.waker.lock().unwrap() = None;
         self.events.lock().unwrap().ended = true;
         self.arrived.notify_all();
+    }
+
+    /// UI side: the text the console of a tab is looking for. Events are
+    /// fixed in size, so the text waits here for the host to read it.
+    pub fn set_find_text(&self, tab: u32, text: String) {
+        self.finds.lock().unwrap().insert(tab, text);
+    }
+
+    /// Host side: the text the console of a tab is looking for.
+    pub fn find_text(&self, tab: u32) -> String {
+        self.finds.lock().unwrap().get(&tab).cloned().unwrap_or_default()
     }
 
     /// UI side: reports something the user did.

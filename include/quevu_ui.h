@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 /* Version of this interface, as returned by quevu_ui_abi. */
-#define QUEVU_UI_ABI 1u
+#define QUEVU_UI_ABI 2u
 
 /* Operations of a feed: what a console asks for and what it is given. */
 #define QUEVU_OP_LIVE   1u /* new chunks, while the console follows      */
@@ -54,6 +54,7 @@ extern "C" {
 #define QUEVU_EV_CONSOLE_REQUEST 6u /* id: tab; op, seq, n: what the console asks  */
 #define QUEVU_EV_MENU            7u /* id: application menu entry chosen           */
 #define QUEVU_EV_CLOSE           8u /* the user asked to close the application     */
+#define QUEVU_EV_CONSOLE_FIND    9u /* id: tab; op: 1 newer, 0 older; seq: from    */
 
 /* A chunk of output: one line of a console. */
 typedef struct quevu_ui_chunk {
@@ -108,6 +109,41 @@ void quevu_ui_console_deliver(uint32_t tab, uint32_t op, uint32_t full,
 
 /* Sets the note shown next to the state of a console. */
 void quevu_ui_console_note(uint32_t tab, const char *note);
+
+/*
+ * Searching. A log may hold millions of chunks, so a search is a step:
+ * it starts at a position, walks one way, examines a bounded number of
+ * chunks and stops. The host runs the step; the window only asks for it
+ * and shows how it went.
+ *
+ * On QUEVU_EV_CONSOLE_FIND the host reads the text with
+ * quevu_ui_console_find_text, searches from ev.seq in the direction of
+ * ev.op, and answers with quevu_ui_console_goto if it found a line, and
+ * with quevu_ui_console_find_status either way.
+ */
+
+/*
+ * Reads the text the console of a tab is looking for. Copies at most
+ * cap - 1 bytes of UTF-8 plus a NUL into buf and returns the length of
+ * the whole text, which may be larger than what fitted.
+ */
+uint32_t quevu_ui_console_find_text(uint32_t tab, char *buf, uint32_t cap);
+
+/*
+ * Moves a console to the lines around something a search found: the
+ * window is replaced by chunks, the view is held, and the line at
+ * position mark is told apart from the rest.
+ */
+void quevu_ui_console_goto(uint32_t tab, const quevu_ui_chunk *chunks,
+                           uint32_t n, uint64_t mark);
+
+/*
+ * Tells the user how a step of a search went. A non-zero resume is the
+ * position the next step should start from if the user asks for the same
+ * text again: the step ran out of budget, not out of log.
+ */
+void quevu_ui_console_find_status(uint32_t tab, const char *status,
+                                  uint64_t resume);
 
 /* Removes a tab. */
 void quevu_ui_tab_remove(uint32_t tab);

@@ -27,7 +27,7 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_HOME,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_F3, VK_HOME,
     VK_NEXT, VK_PRIOR, VK_SHIFT, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -58,6 +58,8 @@ const FG: u32 = rgb(0xd4, 0xd4, 0xd4);
 const NOTE_FG: u32 = rgb(0x8a, 0x8a, 0x8a);
 const SEL_BG: u32 = rgb(0x26, 0x4f, 0x78);
 const SEL_FG: u32 = rgb(0xff, 0xff, 0xff);
+/// The line a search landed on.
+const MARK_BG: u32 = rgb(0x51, 0x48, 0x10);
 
 /// A place in the text: a line, by its stable address, and a column.
 type Pos = (i64, i32);
@@ -175,6 +177,20 @@ impl View {
         let r = self.model.follow();
         self.emit([r]);
         self.changed();
+    }
+
+    /// Moves to the lines around something a search found.
+    pub(crate) unsafe fn goto(&mut self, lines: Vec<Line>, mark: u64) {
+        self.anchor = None;
+        self.hpos = 0;
+        let r = self.model.goto(lines, mark);
+        self.emit(r);
+        self.changed();
+    }
+
+    /// Where the next step of a search should start.
+    pub(crate) fn find_from(&self, forward: bool) -> u64 {
+        self.model.find_from(forward)
     }
 
     /// Holds the text still.
@@ -408,12 +424,19 @@ impl View {
         let top = self.model.top();
         for (row, line) in self.model.lines().iter().skip(top).take(self.model.rows() + 1).enumerate() {
             let y = row as i32 * self.ch;
+            let row_bg = if !line.is_note() && self.model.mark() == Some(line.seq) { MARK_BG } else { BG };
+            if row_bg != BG {
+                let band = RECT { left: 0, top: y, right: w, bottom: y + self.ch };
+                let brush = CreateSolidBrush(row_bg);
+                FillRect(mem, &band, brush);
+                DeleteObject(brush);
+            }
             if self.show_time && !line.is_note() {
                 // The time sits in a margin of its own: it is not part of
                 // the text, so it is never selected or copied.
                 let stamp = clock(line.time_ns);
                 SetTextColor(mem, NOTE_FG);
-                SetBkColor(mem, BG);
+                SetBkColor(mem, row_bg);
                 ExtTextOutW(mem, PAD, y, 0, null(), stamp.as_ptr(), stamp.len() as u32, null());
             }
             let text: Vec<u16> = line.text.encode_utf16().collect();
@@ -443,7 +466,7 @@ impl View {
                     .find(|s| s.start as i32 <= a && a < (s.start + s.len) as i32)
                     .map(|s| rgb((s.rgb >> 16) as u8, (s.rgb >> 8) as u8, s.rgb as u8))
                     .unwrap_or(base);
-                self.draw_run(mem, y, &text, a, b, fg, BG);
+                self.draw_run(mem, y, &text, a, b, fg, row_bg);
             }
         }
 
@@ -493,6 +516,12 @@ impl View {
         }
     }
 
+    /// Tells the parent about something the user asked for that the view
+    /// cannot do by itself.
+    unsafe fn wants(&self, what: usize) {
+        PostMessageW(GetParent(self.hwnd), crate::WM_QV_WANT, what, self.tab as isize);
+    }
+
     unsafe fn on_key(&mut self, vk: u32) -> bool {
         let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
         let page = self.model.rows().max(2) as isize - 1;
@@ -506,6 +535,14 @@ impl View {
             VK_END => self.follow(),
             k if ctrl && k == b'C' as u16 => self.copy(),
             k if ctrl && k == b'A' as u16 => self.select_all(),
+            // Searching is not the view's business: it only tells its
+            // parent what the user asked for, and knows nothing of how
+            // the parent goes about it.
+            k if ctrl && k == b'F' as u16 => self.wants(crate::WANT_FIND_BOX),
+            VK_F3 => {
+                let newer = GetKeyState(VK_SHIFT as i32) < 0;
+                self.wants(if newer { crate::WANT_FIND_NEWER } else { crate::WANT_FIND_OLDER });
+            }
             _ => return false,
         }
         true
