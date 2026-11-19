@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 /* Version of this interface, as returned by quevu_ui_abi. */
-#define QUEVU_UI_ABI 2u
+#define QUEVU_UI_ABI 3u
 
 /* Operations of a feed: what a console asks for and what it is given. */
 #define QUEVU_OP_LIVE   1u /* new chunks, while the console follows      */
@@ -37,6 +37,20 @@ extern "C" {
 #define QUEVU_OP_TAIL   4u /* the last n chunks                          */
 #define QUEVU_OP_BEFORE 5u /* the n chunks that precede seq              */
 #define QUEVU_OP_AFTER  6u /* the n chunks that follow seq               */
+#define QUEVU_OP_HISTORY_BEFORE 7u /* before, from the history: user asked */
+#define QUEVU_OP_HISTORY_AFTER  8u /* after, through the history and out   */
+
+/*
+ * A console escalates in three steps: its own memory; recent output,
+ * which its source gives without being asked twice; and the history,
+ * which is only ever asked for because the user said so. The window
+ * offers the history when the source says there is one, and sends the
+ * two HISTORY operations only after the user accepted.
+ */
+
+/* Flags. */
+#define QUEVU_FLAG_FULL    1u /* the source paused the console by itself  */
+#define QUEVU_FLAG_HISTORY 2u /* a history exists / is involved (see uses) */
 
 /* States of a unit. */
 #define QUEVU_UNIT_STOPPED  0u
@@ -54,7 +68,8 @@ extern "C" {
 #define QUEVU_EV_CONSOLE_REQUEST 6u /* id: tab; op, seq, n: what the console asks  */
 #define QUEVU_EV_MENU            7u /* id: application menu entry chosen           */
 #define QUEVU_EV_CLOSE           8u /* the user asked to close the application     */
-#define QUEVU_EV_CONSOLE_FIND    9u /* id: tab; op: 1 newer, 0 older; seq: from    */
+#define QUEVU_EV_CONSOLE_FIND    9u /* id: tab; op bit 0: newer; bit 1: history    */
+                                    /* allowed by the user; seq: from              */
 
 /* A chunk of output: one line of a console. */
 typedef struct quevu_ui_chunk {
@@ -101,10 +116,13 @@ uint32_t quevu_ui_console_add(const char *title);
 
 /*
  * Hands a console what came down its data lane. op is the operation
- * being answered, or QUEVU_OP_LIVE for live output; full marks a pause
- * the source decided by itself because the console fell behind.
+ * being answered, or QUEVU_OP_LIVE for live output. In flags,
+ * QUEVU_FLAG_FULL marks a pause the source decided by itself because the
+ * console fell behind, and QUEVU_FLAG_HISTORY an answer to
+ * QUEVU_OP_BEFORE that ran short of recent output while a history
+ * exists: the window then offers it to the user.
  */
-void quevu_ui_console_deliver(uint32_t tab, uint32_t op, uint32_t full,
+void quevu_ui_console_deliver(uint32_t tab, uint32_t op, uint32_t flags,
                               const quevu_ui_chunk *chunks, uint32_t n);
 
 /* Sets the note shown next to the state of a console. */
@@ -130,20 +148,23 @@ void quevu_ui_console_note(uint32_t tab, const char *note);
 uint32_t quevu_ui_console_find_text(uint32_t tab, char *buf, uint32_t cap);
 
 /*
- * Moves a console to the lines around something a search found: the
- * window is replaced by chunks, the view is held, and the line at
- * position mark is told apart from the rest.
+ * Moves a console to a line a search found: the line at position mark is
+ * told apart and the view is held. chunks need only hold that line; the
+ * console asks for what surrounds it. QUEVU_FLAG_HISTORY in flags says it
+ * was found in the history.
  */
 void quevu_ui_console_goto(uint32_t tab, const quevu_ui_chunk *chunks,
-                           uint32_t n, uint64_t mark);
+                           uint32_t n, uint64_t mark, uint32_t flags);
 
 /*
  * Tells the user how a step of a search went. A non-zero resume is the
  * position the next step should start from if the user asks for the same
  * text again: the step ran out of budget, not out of log.
+ * QUEVU_FLAG_HISTORY in flags offers the history: the step ran out of
+ * recent output and did not look further.
  */
 void quevu_ui_console_find_status(uint32_t tab, const char *status,
-                                  uint64_t resume);
+                                  uint64_t resume, uint32_t flags);
 
 /* Removes a tab. */
 void quevu_ui_tab_remove(uint32_t tab);

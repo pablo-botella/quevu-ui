@@ -101,6 +101,7 @@ const ID_TIME: u32 = 113;
 const ID_FIND: u32 = 114;
 const ID_FIND_OLDER: u32 = 115;
 const ID_FIND_NEWER: u32 = 116;
+const ID_HISTORY: u32 = 117;
 // What a dialog-style window gets for Enter and Escape.
 const ID_ENTER: u32 = 1;
 const ID_ESCAPE: u32 = 2;
@@ -135,6 +136,12 @@ struct Tab {
     find_resume: u64,
     last_query: String,
     last_newer: bool,
+    /// A search ran out of recent output and the history was offered.
+    find_offer: bool,
+    /// The user allowed searches of this console into the history.
+    find_history: bool,
+    /// Whether the console was following the last time it was looked at.
+    was_following: bool,
 }
 
 struct App {
@@ -156,6 +163,7 @@ struct App {
     find_edit: HWND,
     find_older: HWND,
     find_newer: HWND,
+    history: HWND,
     units: Vec<Unit>,
     tabs: Vec<Tab>,
     app_menu: HMENU,
@@ -251,6 +259,7 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         find_edit: null_mut(),
         find_older: null_mut(),
         find_newer: null_mut(),
+        history: null_mut(),
         units: Vec::new(),
         tabs: Vec::new(),
         app_menu: null_mut(),
@@ -503,6 +512,10 @@ impl App {
             SendMessageW(h, WM_SETFONT, self.font_icon as usize, 1);
             ShowWindow(h, SW_HIDE);
         }
+        // The one way into the history. It shows up only when there is a
+        // history to offer, and nothing goes there until it is pressed.
+        self.history = self.child("BUTTON", "History", BS_PUSHBUTTON as u32, ID_HISTORY);
+        ShowWindow(self.history, SW_HIDE);
         // Pin the stacking order instead of trusting the order of
         // creation: the tab control at the very bottom, the background of
         // the page right above it, everything else over both.
@@ -576,9 +589,12 @@ impl App {
         let right = tx + tw;
         MoveWindow(self.find_newer, right - fb, sy + self.s(1), fb, fb, 1);
         MoveWindow(self.find_older, right - fb * 2 - self.s(2), sy + self.s(1), fb, fb, 1);
+        let hw = self.s(76);
         let used = fw + fb * 2 + self.s(8);
         MoveWindow(self.find_edit, right - used, sy + self.s(2), fw, self.s(24), 1);
-        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - used - pad * 2).max(0), self.s(18), 1);
+        MoveWindow(self.history, right - used - hw - pad, sy + self.s(1), hw, fb, 1);
+        let taken = used + hw + pad * 3;
+        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - taken).max(0), self.s(18), 1);
         let _ = w;
     }
 
@@ -637,6 +653,7 @@ impl App {
 
     unsafe fn refresh_strip(&mut self) {
         let Some(i) = self.current() else {
+            ShowWindow(self.history, SW_HIDE);
             // On the page of switches the strip sums the units up.
             let mut counts = [0usize; 5];
             for u in &self.units {
@@ -660,11 +677,20 @@ impl App {
             return;
         };
         let status = view::of(self.tabs[i].view).map(|v| v.status()).unwrap_or(Status::Waiting);
-        if status == Status::Following {
-            // Back on the live output: the search is over.
+        let following = status == Status::Following;
+        if following && !self.tabs[i].was_following {
+            // Back on the live output: the search is over, and so is any
+            // leave to look into the history. Only on the way back: a
+            // search made while following has things to say too.
             self.tabs[i].find_status.clear();
             self.tabs[i].find_resume = 0;
+            self.tabs[i].find_offer = false;
+            self.tabs[i].find_history = false;
         }
+        self.tabs[i].was_following = following;
+        let scroll_offer = view::of(self.tabs[i].view).map(|v| v.history_offered()).unwrap_or(false);
+        let offer = scroll_offer || self.tabs[i].find_offer;
+        ShowWindow(self.history, if offer { SW_SHOW } else { SW_HIDE });
         let tab = &self.tabs[i];
         // The button shows what pressing it does, as on a tape deck. The
         // text says in words that only the view is held: the application
@@ -676,7 +702,13 @@ impl App {
             Status::PausedFull => ("View held: it fell behind and stopped receiving (the application keeps running). Play jumps to the end", GLYPH_PLAY),
         };
         // While a search is going on, the strip tells how it went.
-        let mut line = if tab.find_status.is_empty() { text.to_string() } else { tab.find_status.clone() };
+        let mut line = if !tab.find_status.is_empty() {
+            tab.find_status.clone()
+        } else if scroll_offer {
+            "This is the oldest recent output. There is a history: press History to load it".to_string()
+        } else {
+            text.to_string()
+        };
         if tab.find_status.is_empty() && !tab.note.is_empty() {
             line.push_str("   |   ");
             line.push_str(&tab.note);
@@ -744,6 +776,9 @@ impl App {
                     find_resume: 0,
                     last_query: String::new(),
                     last_newer: false,
+                    find_offer: false,
+                    find_history: false,
+                    was_following: false,
                 });
                 if self.show_time {
                     if let Some(v) = view::of(view) {
@@ -757,13 +792,13 @@ impl App {
                     v.follow();
                 }
             }
-            Command::Deliver { tab, op, full, lines } => {
+            Command::Deliver { tab, op, full, history, lines } => {
                 if let Some(i) = self.tabs.iter().position(|t| t.id == tab) {
                     // New output on a tab that is not in front leaves a
                     // mark on its title.
                     let fresh = op == quevu_ui_core::op::LIVE && !lines.is_empty();
                     if let Some(v) = view::of(self.tabs[i].view) {
-                        v.deliver(op, full, lines);
+                        v.deliver(op, full, history, lines);
                     }
                     if fresh && self.current() != Some(i) && !self.tabs[i].unseen {
                         self.tabs[i].unseen = true;
@@ -777,17 +812,18 @@ impl App {
                 }
                 self.refresh_strip();
             }
-            Command::Goto { tab, lines, mark } => {
+            Command::Goto { tab, lines, mark, history } => {
                 if let Some(t) = self.tabs.iter().find(|t| t.id == tab) {
                     if let Some(v) = view::of(t.view) {
-                        v.goto(lines, mark);
+                        v.goto(lines, mark, history);
                     }
                 }
             }
-            Command::FindStatus { tab, text, resume } => {
+            Command::FindStatus { tab, text, resume, history } => {
                 if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
                     t.find_status = text;
                     t.find_resume = resume;
+                    t.find_offer = history;
                 }
                 self.refresh_strip();
             }
@@ -902,9 +938,14 @@ impl App {
         tab.last_newer = newer;
         tab.find_resume = 0;
         tab.find_status = format!("Looking for \"{text}\"...");
+        tab.find_offer = false;
         let id = tab.id;
+        // The history is searched only if the user opened it here, by
+        // scrolling into it or by accepting it for a search.
+        let history = tab.find_history || view::of(tab.view).map(|v| v.in_history()).unwrap_or(false);
+        let op = newer as u32 | if history { 2 } else { 0 };
         self.shared.set_find_text(id, text);
-        self.shared.emit(Event { kind: event::CONSOLE_FIND, id, op: newer as u32, n: 0, seq: from });
+        self.shared.emit(Event { kind: event::CONSOLE_FIND, id, op, n: 0, seq: from });
         self.refresh_strip();
     }
 
@@ -915,6 +956,20 @@ impl App {
                     SetFocus(self.find_edit);
                     SendMessageW(self.find_edit, EM_SETSEL, 0, -1);
                 }
+            }
+            ID_HISTORY => {
+                // The user asks for the history: of the search that just
+                // ran out, or of the output on screen.
+                let Some(i) = self.current() else { return };
+                if self.tabs[i].find_offer {
+                    self.tabs[i].find_history = true;
+                    self.tabs[i].find_offer = false;
+                    let newer = self.tabs[i].last_newer;
+                    self.find(newer);
+                } else if let Some(v) = view::of(self.tabs[i].view) {
+                    v.request_history();
+                }
+                SetFocus(self.tabs[i].view);
             }
             ID_FIND_OLDER | ID_FIND_NEWER => {
                 self.find(id == ID_FIND_NEWER);
@@ -1034,7 +1089,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DPICHANGED => {
             app.dpi = hiword(wparam).max(96);
             app.make_fonts();
-            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit] {
+            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.find_edit, app.history] {
                 SendMessageW(h, WM_SETFONT, app.font_ui as usize, 1);
             }
             for h in [app.toggle, app.find_older, app.find_newer] {

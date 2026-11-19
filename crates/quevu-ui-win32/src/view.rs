@@ -180,16 +180,33 @@ impl View {
     }
 
     /// Moves to the lines around something a search found.
-    pub(crate) unsafe fn goto(&mut self, lines: Vec<Line>, mark: u64) {
+    pub(crate) unsafe fn goto(&mut self, lines: Vec<Line>, mark: u64, history: bool) {
         // A selection is anchored to this window of lines: it only
         // survives if the window does.
         let origin = self.model.origin();
         let held = self.model.lines().len();
-        let r = self.model.goto(lines, mark);
+        let r = self.model.goto(lines, mark, history);
         if self.model.origin() != origin || self.model.lines().len() != held {
             self.anchor = None;
             self.hpos = 0;
         }
+        self.emit(r);
+        self.changed();
+    }
+
+    /// Whether there is a history the user could ask for here.
+    pub(crate) fn history_offered(&self) -> bool {
+        self.model.history_offered()
+    }
+
+    /// Whether the user has opened the history in this console.
+    pub(crate) fn in_history(&self) -> bool {
+        self.model.in_history()
+    }
+
+    /// The user asks for the history.
+    pub(crate) unsafe fn request_history(&mut self) {
+        let r = self.model.request_history();
         self.emit(r);
         self.changed();
     }
@@ -207,13 +224,16 @@ impl View {
     }
 
     /// Something came down the data lane.
-    pub(crate) unsafe fn deliver(&mut self, op: u32, full: bool, lines: Vec<Line>) {
+    pub(crate) unsafe fn deliver(&mut self, op: u32, full: bool, history: bool, lines: Vec<Line>) {
         if op == quevu_ui_core::op::FOLLOW {
             // The window starts over: addresses mean something else now.
             self.anchor = None;
             self.hpos = 0;
         }
         self.model.deliver(op, full, lines);
+        if op == quevu_ui_core::op::BEFORE {
+            self.model.offer_history(history);
+        }
         self.changed();
     }
 

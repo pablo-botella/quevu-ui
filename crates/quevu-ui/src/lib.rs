@@ -25,7 +25,13 @@ use quevu_ui_core::text::display_line;
 use quevu_ui_core::UnitState;
 
 /// Version of this interface. A host checks it before anything else.
-pub const QUEVU_UI_ABI: u32 = 2;
+pub const QUEVU_UI_ABI: u32 = 3;
+
+/// Flag of a delivery: the source paused the console by itself.
+pub const QUEVU_FLAG_FULL: u32 = 1;
+/// Flag: there is a history, or the history is involved, depending on
+/// the call.
+pub const QUEVU_FLAG_HISTORY: u32 = 2;
 
 /// A chunk as the host hands it over. The data is copied before the call
 /// returns.
@@ -137,8 +143,9 @@ pub unsafe extern "C" fn quevu_ui_console_add(title: *const c_char) -> u32 {
 }
 
 /// Hands a console what came down its data lane: `op` is the operation
-/// being answered (1 for live output), `full` marks a pause the source
-/// decided by itself.
+/// being answered (1 for live output). In `flags`, `QUEVU_FLAG_FULL` marks
+/// a pause the source decided by itself and `QUEVU_FLAG_HISTORY` an answer
+/// that ran short of recent output while a history exists.
 ///
 /// # Safety
 /// `chunks` must point to `n` valid chunks, each with `len` readable
@@ -147,11 +154,17 @@ pub unsafe extern "C" fn quevu_ui_console_add(title: *const c_char) -> u32 {
 pub unsafe extern "C" fn quevu_ui_console_deliver(
     tab: u32,
     op: u32,
-    full: u32,
+    flags: u32,
     chunks: *const QuevuUiChunk,
     n: u32,
 ) {
-    shared().post(Command::Deliver { tab, op, full: full != 0, lines: lines_from(chunks, n) });
+    shared().post(Command::Deliver {
+        tab,
+        op,
+        full: flags & QUEVU_FLAG_FULL != 0,
+        history: flags & QUEVU_FLAG_HISTORY != 0,
+        lines: lines_from(chunks, n),
+    });
 }
 
 /// Sets the note shown in the status strip of a console, next to its
@@ -184,25 +197,49 @@ pub unsafe extern "C" fn quevu_ui_console_find_text(tab: u32, buf: *mut u8, cap:
 }
 
 /// Moves a console to the lines around something a search found: the
-/// window is replaced by `chunks`, the view is held, and the line at
-/// position `mark` is told apart.
+/// line at position `mark` is told apart and the view is held. `chunks`
+/// need only hold that line: the console asks for what surrounds it.
+/// `QUEVU_FLAG_HISTORY` in `flags` says it was found in the history.
 ///
 /// # Safety
 /// As for `quevu_ui_console_deliver`.
 #[no_mangle]
-pub unsafe extern "C" fn quevu_ui_console_goto(tab: u32, chunks: *const QuevuUiChunk, n: u32, mark: u64) {
-    shared().post(Command::Goto { tab, lines: lines_from(chunks, n), mark });
+pub unsafe extern "C" fn quevu_ui_console_goto(
+    tab: u32,
+    chunks: *const QuevuUiChunk,
+    n: u32,
+    mark: u64,
+    flags: u32,
+) {
+    shared().post(Command::Goto {
+        tab,
+        lines: lines_from(chunks, n),
+        mark,
+        history: flags & QUEVU_FLAG_HISTORY != 0,
+    });
 }
 
 /// Tells the user how a step of a search went. A non-zero `resume` is
 /// the position the next step should start from if the user asks for the
 /// same text again: the step ran out of budget, not out of log.
+/// `QUEVU_FLAG_HISTORY` in `flags` offers the history: the step ran out
+/// of recent output and did not look further.
 ///
 /// # Safety
 /// `text` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn quevu_ui_console_find_status(tab: u32, status: *const c_char, resume: u64) {
-    shared().post(Command::FindStatus { tab, text: text(status), resume });
+pub unsafe extern "C" fn quevu_ui_console_find_status(
+    tab: u32,
+    status: *const c_char,
+    resume: u64,
+    flags: u32,
+) {
+    shared().post(Command::FindStatus {
+        tab,
+        text: text(status),
+        resume,
+        history: flags & QUEVU_FLAG_HISTORY != 0,
+    });
 }
 
 /// Removes a tab.

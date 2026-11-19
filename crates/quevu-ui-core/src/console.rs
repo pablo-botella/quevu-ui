@@ -76,6 +76,10 @@ pub struct Console {
     rows: usize,
     origin: i64,
     mark: Option<u64>,
+    history_offered: bool,
+    in_history: bool,
+    /// The last answer looking back came short of what was asked.
+    top_exhausted_or_short: bool,
     status: Status,
     top_exhausted: bool,
     pending_before: bool,
@@ -96,6 +100,9 @@ impl Console {
             rows: 1,
             origin: 0,
             mark: None,
+            history_offered: false,
+            in_history: false,
+            top_exhausted_or_short: false,
             status: Status::Waiting,
             top_exhausted: false,
             pending_before: false,
@@ -212,16 +219,17 @@ impl Console {
         }
         self.top = target.min(self.max_top());
         let margin = self.rows * 2;
+        let (before, after) = self.ops();
         if older && self.top <= margin && !self.top_exhausted && !self.pending_before {
             if let Some(seq) = self.first_seq() {
                 self.pending_before = true;
-                out.push(Request { op: op::BEFORE, seq, n: self.page });
+                out.push(Request { op: before, seq, n: self.page });
             }
         }
         if newer && self.top + self.rows + margin >= self.lines.len() && !self.pending_after {
             if let Some(seq) = self.last_seq() {
                 self.pending_after = true;
-                out.push(Request { op: op::AFTER, seq, n: self.page });
+                out.push(Request { op: after, seq, n: self.page });
             }
         }
         out
@@ -279,37 +287,93 @@ impl Console {
     /// A search found a line. If the console already holds it, nothing is
     /// reloaded: the line is told apart and the view moves only if it has
     /// to, so walking through matches that are close together is smooth.
-    /// Otherwise the window is replaced by the lines around it, with the
-    /// line found a third of the way down. Either way the view is held.
-    /// Returns the request to send if the console was following.
-    pub fn goto(&mut self, lines: Vec<Line>, mark: u64) -> Option<Request> {
-        let was_following = self.is_following();
+    /// Otherwise the window starts over from the lines given (the line
+    /// found is enough) and the console asks for what surrounds it, like
+    /// it does when the user scrolls. Either way the view is held.
+    ///
+    /// `history` says the line was found with the history open, which the
+    /// user must have asked for: the console is in the history from here.
+    /// Returns the requests to send.
+    pub fn goto(&mut self, lines: Vec<Line>, mark: u64, history: bool) -> Vec<Request> {
+        let mut out = Vec::new();
+        if self.is_following() {
+            out.push(Request { op: op::PAUSE, seq: 0, n: 0 });
+        }
+        self.status = Status::Paused;
+        self.mark = Some(mark);
+        if history {
+            self.in_history = true;
+            self.history_offered = false;
+        }
         if let Some(at) = self.lines.iter().position(|l| l.seq == mark) {
-            self.status = Status::Paused;
-            self.mark = Some(mark);
             // In sight means comfortably in sight: a line on the very
             // edge of the view is brought in.
             let margin = (self.rows / 4).min(2);
             if at < self.top + margin || at + margin >= self.top + self.rows {
                 self.top = at.saturating_sub(self.rows / 3).min(self.max_top());
             }
-            return was_following.then_some(Request { op: op::PAUSE, seq: 0, n: 0 });
+            return out;
         }
         self.lines.clear();
         for c in lines {
             self.append(c);
         }
-        self.status = Status::Paused;
         self.origin = 0;
         self.top_exhausted = false;
-        self.pending_before = false;
-        self.pending_after = false;
-        self.mark = Some(mark);
         let at = self.lines.iter().position(|l| l.seq == mark).unwrap_or(0);
         self.top = at.saturating_sub(self.rows / 3).min(self.max_top());
-        was_following.then_some(Request { op: op::PAUSE, seq: 0, n: 0 })
+        // What is around the line found is fetched from whoever has it.
+        let (before, after) = self.ops();
+        self.pending_before = self.first_seq().is_some();
+        self.pending_after = self.pending_before;
+        if let (Some(first), Some(last)) = (self.first_seq(), self.last_seq()) {
+            out.push(Request { op: before, seq: first, n: self.page });
+            out.push(Request { op: after, seq: last, n: self.page });
+        }
+        out
     }
 
+    /// The operations to move by position with: the plain ones, or the
+    /// ones that reach the history once the user has asked for it.
+    fn ops(&self) -> (u32, u32) {
+        if self.in_history {
+            (op::HISTORY_BEFORE, op::HISTORY_AFTER)
+        } else {
+            (op::BEFORE, op::AFTER)
+        }
+    }
+
+    /// Whether recent output has run out and there is a history the user
+    /// could ask for.
+    pub fn history_offered(&self) -> bool {
+        self.history_offered
+    }
+
+    /// Whether the user has opened the history in this console.
+    pub fn in_history(&self) -> bool {
+        self.in_history
+    }
+
+    /// The source says whether there is a history behind the recent
+    /// output that just ran short. It is only an offer.
+    pub fn offer_history(&mut self, available: bool) {
+        self.history_offered = available && !self.in_history && self.top_exhausted_or_short;
+    }
+
+    /// The user asks for the history. From here on the console moves
+    /// through it like through anything else, until it follows again.
+    pub fn request_history(&mut self) -> Option<Request> {
+        if !self.history_offered {
+            return None;
+        }
+        self.history_offered = false;
+        self.in_history = true;
+        self.top_exhausted = false;
+        self.pending_before = true;
+        // With nothing on screen, the history is entered from its end.
+        let seq = self.first_seq().unwrap_or(i64::MAX as u64);
+        Some(Request { op: op::HISTORY_BEFORE, seq, n: self.page })
+    }
     /// Something came down the data lane.
     pub fn deliver(&mut self, op: u32, full: bool, chunks: Vec<Line>) {
         match op {
@@ -321,6 +385,9 @@ impl Console {
                 self.status = Status::Following;
                 self.origin = 0;
                 self.mark = None;
+                self.history_offered = false;
+                self.in_history = false;
+                self.top_exhausted_or_short = false;
                 self.top_exhausted = false;
                 self.pending_before = false;
                 self.pending_after = false;
@@ -344,8 +411,9 @@ impl Console {
                     self.status = Status::Paused;
                 }
             }
-            op::BEFORE => {
+            op::BEFORE | op::HISTORY_BEFORE => {
                 self.pending_before = false;
+                self.top_exhausted_or_short = chunks.len() < self.page as usize;
                 let first = self.first_seq();
                 let mut older: Vec<Line> = match first {
                     Some(f) => chunks.into_iter().filter(|c| c.seq < f).collect(),
@@ -373,7 +441,7 @@ impl Console {
                 }
                 self.top = self.top.min(self.max_top());
             }
-            op::AFTER => {
+            op::AFTER | op::HISTORY_AFTER => {
                 self.pending_after = false;
                 if self.is_following() {
                     return;
@@ -627,7 +695,18 @@ mod tests {
     fn a_search_result_replaces_the_window_and_holds_it() {
         let mut c = started(1000);
         // Found far away: the lines around position 400 arrive.
-        assert_eq!(c.goto(lines(380, 420), 400), Some(Request { op: op::PAUSE, seq: 0, n: 0 }));
+        let reqs = c.goto(lines(380, 420), 400, false);
+        // Held, and what surrounds the lines given is asked for.
+        assert_eq!(
+            reqs,
+            vec![
+                Request { op: op::PAUSE, seq: 0, n: 0 },
+                Request { op: op::BEFORE, seq: 380, n: 20 },
+                Request { op: op::AFTER, seq: 420, n: 20 },
+            ]
+        );
+        c.deliver(op::BEFORE, false, Vec::new());
+        c.deliver(op::AFTER, false, Vec::new());
         assert_eq!(c.status(), Status::Paused);
         assert_eq!(c.mark(), Some(400));
         assert_eq!(seqs(&c), (380..=420).collect::<Vec<_>>());
@@ -636,11 +715,20 @@ mod tests {
         // The next step goes on from the line found, in either direction.
         assert_eq!(c.find_from(false), 400);
         assert_eq!(c.find_from(true), 400);
-        // Already held: no second pause request.
-        assert_eq!(c.goto(lines(280, 320), 300), None);
-        // The window can grow from there like any other.
-        let reqs = c.scroll_by(-20);
-        assert_eq!(reqs, vec![Request { op: op::BEFORE, seq: 280, n: 20 }]);
+        // Already held: no second pause request, only the surroundings.
+        let reqs = c.goto(lines(300, 300), 300, false);
+        assert_eq!(
+            reqs,
+            vec![
+                Request { op: op::BEFORE, seq: 300, n: 20 },
+                Request { op: op::AFTER, seq: 300, n: 20 },
+            ]
+        );
+        // The line found is enough: the rest arrives like any page.
+        c.deliver(op::BEFORE, false, lines(280, 299));
+        c.deliver(op::AFTER, false, lines(301, 320));
+        assert_eq!(seqs(&c), (280..=320).collect::<Vec<_>>());
+        assert!(visible(&c).contains(&300));
         // Going back to the live output forgets the mark.
         c.follow();
         c.deliver(op::FOLLOW, false, lines(981, 1000));
@@ -656,19 +744,83 @@ mod tests {
         let on_screen = visible(&c);
         // In sight: nothing moves at all.
         let target = on_screen[4];
-        assert_eq!(c.goto(lines(target - 2, target + 2), target), None);
+        assert!(c.goto(lines(target - 2, target + 2), target, false).is_empty());
         assert_eq!(c.mark(), Some(target));
         assert_eq!(seqs(&c), held);
         assert_eq!(visible(&c), on_screen);
         // Held but out of sight: the view moves, the window stays.
-        assert_eq!(c.goto(lines(60, 64), 62), None);
+        assert!(c.goto(lines(60, 64), 62, false).is_empty());
         assert_eq!(seqs(&c), held);
         assert!(visible(&c).contains(&62));
         // From the live output it is held first.
         let mut c = started(100);
-        assert_eq!(c.goto(Vec::new(), 95), Some(Request { op: op::PAUSE, seq: 0, n: 0 }));
+        assert_eq!(c.goto(Vec::new(), 95, false), vec![Request { op: op::PAUSE, seq: 0, n: 0 }]);
         assert_eq!(c.status(), Status::Paused);
         assert_eq!(visible(&c), (91..=100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_history_is_offered_and_entered_only_by_the_user() {
+        let mut c = started(100);
+        c.scroll_by(-1);
+        // Recent output runs short, and the source says there is more.
+        c.deliver(op::BEFORE, false, lines(75, 80));
+        c.offer_history(true);
+        assert!(c.history_offered());
+        assert!(!c.in_history());
+        // Scrolling further asks for recent output only, and then stops.
+        let reqs = c.scroll_by(-30);
+        assert_eq!(reqs, vec![Request { op: op::BEFORE, seq: 75, n: 20 }]);
+        c.deliver(op::BEFORE, false, Vec::new());
+        c.offer_history(true);
+        assert!(c.scroll_by(-5).is_empty());
+        assert!(c.history_offered());
+        // The user asks.
+        assert_eq!(c.request_history(), Some(Request { op: op::HISTORY_BEFORE, seq: 75, n: 20 }));
+        assert!(c.in_history() && !c.history_offered());
+        assert_eq!(c.request_history(), None);
+        c.deliver(op::HISTORY_BEFORE, false, lines(55, 74));
+        assert_eq!(seqs(&c)[0], 55);
+        // From here on the console moves through the history by itself.
+        let reqs = c.scroll_by(-40);
+        assert_eq!(reqs, vec![Request { op: op::HISTORY_BEFORE, seq: 55, n: 20 }]);
+        c.deliver(op::HISTORY_BEFORE, false, lines(35, 54));
+        let reqs = c.scroll_by(60);
+        assert_eq!(reqs, vec![Request { op: op::HISTORY_AFTER, seq: 94, n: 20 }]);
+        // A full page looking back is not the end, so no offer is kept.
+        c.offer_history(true);
+        assert!(!c.history_offered());
+        // Following again leaves the history.
+        c.follow();
+        c.deliver(op::FOLLOW, false, lines(981, 1000));
+        assert!(!c.in_history() && !c.history_offered());
+        let reqs = c.scroll_by(-1);
+        assert!(reqs.contains(&Request { op: op::BEFORE, seq: 981, n: 20 }));
+    }
+
+    #[test]
+    fn no_offer_without_a_history() {
+        let mut c = started(100);
+        c.scroll_by(-1);
+        c.deliver(op::BEFORE, false, Vec::new());
+        c.offer_history(false);
+        assert!(!c.history_offered());
+        assert_eq!(c.request_history(), None);
+    }
+
+    #[test]
+    fn a_match_found_in_the_history_puts_the_console_in_it() {
+        let mut c = started(1000);
+        let reqs = c.goto(lines(300, 300), 300, true);
+        assert!(c.in_history());
+        assert_eq!(
+            reqs,
+            vec![
+                Request { op: op::PAUSE, seq: 0, n: 0 },
+                Request { op: op::HISTORY_BEFORE, seq: 300, n: 20 },
+                Request { op: op::HISTORY_AFTER, seq: 300, n: 20 },
+            ]
+        );
     }
 
     #[test]

@@ -81,6 +81,14 @@ never runs to the end of a log of millions of lines by itself:
 The next step starts from the line last found, or, if there is none, from
 the edge of what is on screen.
 
+**History.** The console escalates in three steps: its own memory, recent
+output, and the history. The first two are automatic. When recent output
+runs out and the source says a history exists, a *History* button appears
+and the strip says so; nothing is asked of the history until the user
+presses it. The same goes for a search: a step that finds nothing in
+recent output offers the history and stops. Going back to the live output
+leaves the history.
+
 **Time.** *Console > Show the time of each line* adds a margin with the
 local time each chunk entered its log. The margin is not part of the text:
 it is never selected or copied.

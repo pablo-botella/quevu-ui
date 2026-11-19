@@ -31,6 +31,12 @@ pub mod op {
     pub const BEFORE: u32 = 5;
     /// The N chunks that follow a position.
     pub const AFTER: u32 = 6;
+    /// BEFORE, answered from the history. Sent only because the user
+    /// asked for the history.
+    pub const HISTORY_BEFORE: u32 = 7;
+    /// AFTER, for a console that is in the history: forwards through it
+    /// and out of it, back into recent output.
+    pub const HISTORY_AFTER: u32 = 8;
 }
 
 /// State of a unit, numbered as in the host.

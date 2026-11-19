@@ -31,7 +31,9 @@ pub enum Command {
     /// A new tab holding a pseudo-console.
     ConsoleAdd { id: u32, title: String },
     /// Something for a console came down its data lane.
-    Deliver { tab: u32, op: u32, full: bool, lines: Vec<Line> },
+    /// `history` is the source's offer: recent output ran short and there
+    /// is a history the user could ask for.
+    Deliver { tab: u32, op: u32, full: bool, history: bool, lines: Vec<Line> },
     /// A note for the status strip of a console (the state of its queues,
     /// for instance).
     ConsoleNote { tab: u32, text: String },
@@ -42,11 +44,14 @@ pub enum Command {
     /// Whether closing the window hides it in the system tray.
     Tray { enabled: bool },
     /// A search found a line: the console moves to the lines around it.
-    Goto { tab: u32, lines: Vec<Line>, mark: u64 },
+    /// `history` says it was found with the history open.
+    Goto { tab: u32, lines: Vec<Line>, mark: u64, history: bool },
     /// What a step of a search has to say. A non-zero `resume` is where
     /// the next step should start if the user asks for the same thing
     /// again: the search ran out of budget, not out of log.
-    FindStatus { tab: u32, text: String, resume: u64 },
+    /// `history` is an offer: the search ran out of recent output and
+    /// there is a history it did not look into.
+    FindStatus { tab: u32, text: String, resume: u64, history: bool },
     /// Shows or hides the window.
     Show { visible: bool },
     /// Ends the event loop.
@@ -74,7 +79,8 @@ pub mod event {
     pub const CLOSE: u32 = 8;
     /// The user asked the console of tab `id` to look for a text: `op` is
     /// 1 to look towards newer output and 0 towards older, `seq` is where
-    /// to start. The text itself is read with [`super::Shared::find_text`].
+    /// to start. Bit 1 of `op` set means the user allowed the history.
+    /// The text itself is read with [`super::Shared::find_text`].
     pub const CONSOLE_FIND: u32 = 9;
 }
 
