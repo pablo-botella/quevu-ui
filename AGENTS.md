@@ -54,9 +54,9 @@ position, 300 chunks at a time, with `CONSOLE_REQUEST` events.
 
 - **Following:** pinned to the end, appending live output.
 - **Paused:** the text holds still. Scrolling back, selecting text or the
-  Pause button hang the *do not disturb* sign; the host stops sending live
+  transport button hang the *do not disturb* sign; the host stops sending live
   output. If the console falls behind, the source hangs the sign itself.
-- **Resume** (the button, or End) does not catch up with what was missed:
+- **Play** (the button, or End) does not catch up with what was missed:
   it asks for the last page and follows from there.
 - Scrolling near either end of the window asks for the next page in that
   direction and drops lines at the far end. An empty answer looking back
@@ -69,6 +69,11 @@ sideways.
 
 A chunk is always exactly one line: tabs are expanded, ANSI escape
 sequences are dropped and other control characters become a middle dot.
+
+The transport button is a small pause/play mark at the right end of the
+tab row, as on a tape deck, and shows what pressing it does. It sits on
+the console and away from the switches on purpose: it holds the view, not
+the unit. The application and its log go on while a view is held.
 
 ## Dialogs and web views
 

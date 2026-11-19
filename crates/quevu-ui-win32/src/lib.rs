@@ -70,6 +70,10 @@ const WM_QV_TRAY: u32 = WM_APP + 3;
 
 const CLASS: &str = "QuevuPanelWindow";
 
+// Pause and play in the symbol font of the system (Segoe MDL2 Assets).
+const GLYPH_PAUSE: &str = "\u{e769}";
+const GLYPH_PLAY: &str = "\u{e768}";
+
 // Styles of the STATIC control.
 const SS_NOPREFIX: u32 = 0x80;
 const SS_ENDELLIPSIS: u32 = 0x4000;
@@ -108,6 +112,7 @@ struct App {
     dpi: u32,
     font_ui: HFONT,
     font_mono: HFONT,
+    font_icon: HFONT,
     cell: (i32, i32),
     start_all: HWND,
     stop_all: HWND,
@@ -185,6 +190,7 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         dpi: GetDpiForWindow(hwnd).max(96),
         font_ui: null_mut(),
         font_mono: null_mut(),
+        font_icon: null_mut(),
         cell: (8, 16),
         start_all: null_mut(),
         stop_all: null_mut(),
@@ -336,6 +342,16 @@ impl App {
         self.font_mono = CreateFontW(
             height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH_MODERN, face.as_ptr(),
         );
+        // The symbol font of the system, for the transport button of a
+        // console: the pause and play marks of a tape deck.
+        if !self.font_icon.is_null() {
+            DeleteObject(self.font_icon);
+        }
+        let icons = wide("Segoe MDL2 Assets");
+        self.font_icon = CreateFontW(
+            -(10 * self.dpi as i32 / 72), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, CLEARTYPE_QUALITY, 0, icons.as_ptr(),
+        );
+
         let dc = GetDC(self.hwnd);
         let old = SelectObject(dc, self.font_mono);
         let mut tm: TEXTMETRICW = zeroed();
@@ -356,7 +372,7 @@ impl App {
         AppendMenuW(panel, MF_STRING, ID_EXIT as usize, wide("E&xit").as_ptr());
         AppendMenuW(bar, MF_POPUP, panel as usize, wide("&Panel").as_ptr());
         let console = CreatePopupMenu();
-        AppendMenuW(console, MF_STRING, ID_TOGGLE as usize, wide("&Pause / resume\tEnd").as_ptr());
+        AppendMenuW(console, MF_STRING, ID_TOGGLE as usize, wide("&Hold / follow the output\tEnd").as_ptr());
         AppendMenuW(console, MF_STRING, ID_COPY as usize, wide("&Copy\tCtrl+C").as_ptr());
         AppendMenuW(bar, MF_POPUP, console as usize, wide("&Console").as_ptr());
         SetMenu(self.hwnd, bar);
@@ -365,7 +381,8 @@ impl App {
         self.stop_all = self.child("BUTTON", "Stop all", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_STOP_ALL);
         self.tabs_ctl = self.child("SysTabControl32", "", WS_CLIPSIBLINGS | WS_TABSTOP, 0);
         self.strip = self.child("STATIC", "", SS_ENDELLIPSIS | SS_NOPREFIX, 0);
-        self.toggle = self.child("BUTTON", "Pause", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_TOGGLE);
+        self.toggle = self.child("BUTTON", GLYPH_PAUSE, BS_PUSHBUTTON as u32 | WS_TABSTOP | WS_CLIPSIBLINGS, ID_TOGGLE);
+        SendMessageW(self.toggle, WM_SETFONT, self.font_icon as usize, 1);
         EnableWindow(self.toggle, 0);
         self.layout();
     }
@@ -411,10 +428,16 @@ impl App {
             );
         }
 
-        let tgw = self.s(96);
+        // The transport button sits in the row of the tabs, at its right
+        // end: on the console it belongs to and away from the switches,
+        // because it holds the view, not the unit.
+        let side = (area.top - self.s(4)).max(self.s(18));
+        MoveWindow(self.toggle, tx + tw - side - self.s(2), pad, side, side, 1);
+        SetWindowPos(self.toggle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
         let sy = pad + th + (strip_h - bh) / 2;
-        MoveWindow(self.toggle, w - pad - tgw, sy, tgw, bh, 1);
-        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - tgw - pad * 2).max(0), self.s(18), 1);
+        MoveWindow(self.strip, tx + pad / 2, sy + self.s(5), (tw - pad).max(0), self.s(18), 1);
+        let _ = w;
     }
 
     fn current(&self) -> Option<usize> {
@@ -444,11 +467,14 @@ impl App {
         };
         let tab = &self.tabs[i];
         let status = view::of(tab.view).map(|v| v.status()).unwrap_or(Status::Waiting);
+        // The button shows what pressing it does, as on a tape deck. The
+        // text says in words that only the view is held: the application
+        // and its log go on.
         let (text, button) = match status {
-            Status::Waiting => ("Waiting for output...", "Pause"),
-            Status::Following => ("Following the live output", "Pause"),
-            Status::Paused => ("Paused: the text holds still. Press End or Resume to go back to the live output", "Resume"),
-            Status::PausedFull => ("Do not disturb: the console fell behind and stopped receiving. Resume jumps to the end", "Resume"),
+            Status::Waiting => ("Waiting for output...", GLYPH_PAUSE),
+            Status::Following => ("Following the live output", GLYPH_PAUSE),
+            Status::Paused => ("View held (the application keeps running). Press play or End to follow the live output", GLYPH_PLAY),
+            Status::PausedFull => ("View held: it fell behind and stopped receiving (the application keeps running). Play jumps to the end", GLYPH_PLAY),
         };
         let mut line = text.to_string();
         if !tab.note.is_empty() {
@@ -659,6 +685,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         if let Some(app) = take_state::<App>(hwnd) {
             DeleteObject(app.font_ui);
             DeleteObject(app.font_mono);
+            DeleteObject(app.font_icon);
         }
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
@@ -705,9 +732,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DPICHANGED => {
             app.dpi = hiword(wparam).max(96);
             app.make_fonts();
-            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip, app.toggle] {
+            for h in [app.start_all, app.stop_all, app.tabs_ctl, app.strip] {
                 SendMessageW(h, WM_SETFONT, app.font_ui as usize, 1);
             }
+            SendMessageW(app.toggle, WM_SETFONT, app.font_icon as usize, 1);
             for u in &app.units {
                 SendMessageW(u.button, WM_SETFONT, app.font_ui as usize, 1);
                 SendMessageW(u.label, WM_SETFONT, app.font_ui as usize, 1);
