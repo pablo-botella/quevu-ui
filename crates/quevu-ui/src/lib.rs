@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use quevu_ui_core::console::Line;
 use quevu_ui_core::shared::{Command, Event, Next, Shared};
-use quevu_ui_core::text::display_text;
+use quevu_ui_core::text::display_line;
 use quevu_ui_core::UnitState;
 
 /// Version of this interface. A host checks it before anything else.
@@ -142,7 +142,8 @@ pub unsafe extern "C" fn quevu_ui_console_deliver(
             } else {
                 std::slice::from_raw_parts(c.data, c.len as usize)
             };
-            lines.push(Line { seq: c.seq, time_ns: c.time_ns, text: display_text(data) });
+            let (text, spans) = display_line(data);
+            lines.push(Line { seq: c.seq, time_ns: c.time_ns, text, spans });
         }
     }
     shared().post(Command::Deliver { tab, op, full: full != 0, lines });

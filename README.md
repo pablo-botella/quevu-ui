@@ -1,8 +1,9 @@
 # quevu-ui
 
-The window of [quevu](https://github.com/pablo-botella/quevu): the
-switches of an application (a global one and one per unit) and its screens
-(a tab per log, each a pseudo-console), plus a menu and an icon in the
+The window of [quevu](https://github.com/pablo-botella/quevu): a row
+of tabs, the first with the switches of an application (a global one and
+one per unit) and the rest its screens (a tab per log, each a
+pseudo-console), plus a menu and an icon in the
 notification area to hide in. Nothing more: quevu wants a window for
 applications, not a GUI toolkit.
 
@@ -98,8 +99,19 @@ Keys: arrows and Page Up/Down scroll, Home goes to the top of the window,
 End resumes, Ctrl+A selects all, Ctrl+C copies. Shift+wheel scrolls
 sideways.
 
-A chunk is always exactly one line: tabs are expanded, ANSI escape
-sequences are dropped and other control characters become a middle dot.
+A chunk is always exactly one line: tabs are expanded and control
+characters become a middle dot.
+
+**Colors.** ANSI color sequences (ECMA-48 SGR, what programs written for
+a terminal emit) are taken out of the text and drawn as color: the eight
+basic colors and their bright versions, bold, the 256-color table and
+24-bit colors, foreground only. Other escape sequences are dropped. A
+selection or a copy never contains an escape code. Color does not carry
+over from one chunk to the next.
+
+**Layout.** One row of tabs across the window. The first tab, *Units*,
+holds the switches: the global one and a row per unit with its state and,
+if it failed, the whole error. Every other tab is a console.
 
 The transport button is a small pause/play mark at the right end of the
 tab row, as on a tape deck, and shows what pressing it does. It sits on

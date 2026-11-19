@@ -369,11 +369,33 @@ impl View {
             let y = row as i32 * self.ch;
             let text: Vec<u16> = line.text.encode_utf16().collect();
             let len = text.len() as i32;
-            let fg = if line.is_note() { NOTE_FG } else { FG };
+            let base = if line.is_note() { NOTE_FG } else { FG };
             let (from, to) = Self::selected_cols(sel, origin + (top + row) as i64, len);
-            self.draw_run(mem, y, &text, 0, from, fg, BG);
-            self.draw_run(mem, y, &text, from, to, SEL_FG, SEL_BG);
-            self.draw_run(mem, y, &text, to, len, fg, BG);
+            // The line is cut wherever the color or the selection changes
+            // and each piece is drawn in one go. The selection wins over
+            // the color of the text.
+            let mut cuts: Vec<i32> = vec![0, len, from, to];
+            for s in &line.spans {
+                cuts.push(s.start as i32);
+                cuts.push((s.start + s.len) as i32);
+            }
+            cuts.retain(|c| (0..=len).contains(c));
+            cuts.sort_unstable();
+            cuts.dedup();
+            for piece in cuts.windows(2) {
+                let (a, b) = (piece[0], piece[1]);
+                if from < to && a >= from && b <= to {
+                    self.draw_run(mem, y, &text, a, b, SEL_FG, SEL_BG);
+                    continue;
+                }
+                let fg = line
+                    .spans
+                    .iter()
+                    .find(|s| s.start as i32 <= a && a < (s.start + s.len) as i32)
+                    .map(|s| rgb((s.rgb >> 16) as u8, (s.rgb >> 8) as u8, s.rgb as u8))
+                    .unwrap_or(base);
+                self.draw_run(mem, y, &text, a, b, fg, BG);
+            }
         }
 
         BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);

@@ -6,9 +6,10 @@ mkskill:
 
 # quevu-ui
 
-The window of [quevu](https://github.com/pablo-botella/quevu): the
-switches of an application (a global one and one per unit) and its screens
-(a tab per log, each a pseudo-console), plus a menu and an icon in the
+The window of [quevu](https://github.com/pablo-botella/quevu): a row
+of tabs, the first with the switches of an application (a global one and
+one per unit) and the rest its screens (a tab per log, each a
+pseudo-console), plus a menu and an icon in the
 notification area to hide in. Nothing more: quevu wants a window for
 applications, not a GUI toolkit.
 

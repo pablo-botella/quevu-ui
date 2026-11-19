@@ -25,7 +25,7 @@ use quevu_ui_core::UnitState;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontIndirectW, CreateFontW, DeleteObject, GetDC, GetSysColorBrush, GetTextMetricsW,
-    ReleaseDC, SelectObject, SetBkMode, COLOR_BTNFACE, HFONT, TEXTMETRICW, TRANSPARENT,
+    ReleaseDC, SelectObject, SetBkMode, COLOR_BTNFACE, COLOR_WINDOW, HFONT, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
     ActivateActCtx, CreateActCtxW, DeactivateActCtx, ReleaseActCtx, ACTCTXW,
@@ -50,7 +50,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsDialogMessageW, IsWindowVisible, LoadCursorW, LoadIconW, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, SetMenu, SetWindowPos,
     SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BS_PUSHBUTTON,
-    CW_USEDEFAULT, HMENU, HWND_TOP, IDC_ARROW, IDI_APPLICATION, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    CW_USEDEFAULT, HMENU, HWND_BOTTOM, HWND_TOP, IDC_ARROW, IDI_APPLICATION, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MSG, NONCLIENTMETRICSW, SIZE_MINIMIZED, SPI_GETNONCLIENTMETRICS,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
     TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
@@ -69,6 +69,9 @@ pub(crate) const WM_QV_STATE: u32 = WM_APP + 2;
 const WM_QV_TRAY: u32 = WM_APP + 3;
 
 const CLASS: &str = "QuevuPanelWindow";
+/// The plain background of the page of switches: a window that does
+/// nothing but paint itself in the color the labels on it are drawn with.
+const PAGE_CLASS: &str = "QuevuPanelPage";
 
 // Pause and play in the symbol font of the system (Segoe MDL2 Assets).
 const GLYPH_PAUSE: &str = "\u{e769}";
@@ -117,6 +120,7 @@ struct App {
     start_all: HWND,
     stop_all: HWND,
     tabs_ctl: HWND,
+    page: HWND,
     strip: HWND,
     toggle: HWND,
     units: Vec<Unit>,
@@ -160,6 +164,17 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         ..zeroed()
     };
     RegisterClassExW(&wc);
+    let page_class = wide(PAGE_CLASS);
+    let page = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(DefWindowProcW),
+        hInstance: hinst,
+        hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+        hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+        lpszClassName: page_class.as_ptr(),
+        ..zeroed()
+    };
+    RegisterClassExW(&page);
     view::register(hinst);
 
     let wtitle = wide(title);
@@ -195,6 +210,7 @@ unsafe fn run_inner(title: &str, shared: Arc<Shared>) -> i32 {
         start_all: null_mut(),
         stop_all: null_mut(),
         tabs_ctl: null_mut(),
+        page: null_mut(),
         strip: null_mut(),
         toggle: null_mut(),
         units: Vec::new(),
@@ -377,13 +393,30 @@ impl App {
         AppendMenuW(bar, MF_POPUP, console as usize, wide("&Console").as_ptr());
         SetMenu(self.hwnd, bar);
 
+        // The tab control, the plain background of the page of switches,
+        // and the switches themselves. Which one covers which is pinned
+        // further down, not left to the order of creation.
+        self.tabs_ctl = self.child("SysTabControl32", "", WS_CLIPSIBLINGS | WS_TABSTOP, 0);
+        self.page = self.child(PAGE_CLASS, "", WS_CLIPSIBLINGS, 0);
         self.start_all = self.child("BUTTON", "Start all", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_START_ALL);
         self.stop_all = self.child("BUTTON", "Stop all", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_STOP_ALL);
-        self.tabs_ctl = self.child("SysTabControl32", "", WS_CLIPSIBLINGS | WS_TABSTOP, 0);
+        // The first tab is always there: the page of switches.
+        let mut text = wide("Units");
+        let mut item: TCITEMW = zeroed();
+        item.mask = TCIF_TEXT;
+        item.pszText = text.as_mut_ptr();
+        SendMessageW(self.tabs_ctl, TCM_INSERTITEMW, 0, &item as *const TCITEMW as LPARAM);
+        SendMessageW(self.tabs_ctl, TCM_SETCURSEL, 0, 0);
         self.strip = self.child("STATIC", "", SS_ENDELLIPSIS | SS_NOPREFIX, 0);
         self.toggle = self.child("BUTTON", GLYPH_PAUSE, BS_PUSHBUTTON as u32 | WS_TABSTOP | WS_CLIPSIBLINGS, ID_TOGGLE);
         SendMessageW(self.toggle, WM_SETFONT, self.font_icon as usize, 1);
         EnableWindow(self.toggle, 0);
+        // Pin the stacking order instead of trusting the order of
+        // creation: the tab control at the very bottom, the background of
+        // the page right above it, everything else over both.
+        let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        SetWindowPos(self.page, HWND_BOTTOM, 0, 0, 0, 0, keep);
+        SetWindowPos(self.tabs_ctl, HWND_BOTTOM, 0, 0, 0, 0, keep);
         self.layout();
     }
 
@@ -392,26 +425,13 @@ impl App {
         GetClientRect(self.hwnd, &mut rc);
         let (w, h) = (rc.right, rc.bottom);
         let pad = self.s(8);
-        let left = self.s(250);
         let bh = self.s(28);
 
-        // The switches.
-        let half = (left - 3 * pad) / 2;
-        MoveWindow(self.start_all, pad, pad, half, bh, 1);
-        MoveWindow(self.stop_all, pad * 2 + half, pad, half, bh, 1);
-        let row = self.s(32);
-        let bw = self.s(64);
-        let mut y = pad * 2 + bh + pad / 2;
-        for u in &self.units {
-            MoveWindow(u.button, pad, y, bw, self.s(26), 1);
-            MoveWindow(u.label, pad * 2 + bw, y + self.s(5), left - pad * 3 - bw, self.s(18), 1);
-            y += row;
-        }
-
-        // The screens.
+        // One row of tabs across the whole window: the switches are the
+        // first tab, the screens are the rest.
         let strip_h = self.s(36);
-        let tx = left;
-        let tw = (w - left - pad).max(0);
+        let tx = pad;
+        let tw = (w - pad * 2).max(0);
         let th = (h - strip_h - pad).max(0);
         MoveWindow(self.tabs_ctl, tx, pad, tw, th, 1);
         let mut area = RECT { left: 0, top: 0, right: tw, bottom: th };
@@ -428,9 +448,32 @@ impl App {
             );
         }
 
+        // The page of switches, laid out inside the first tab: the global
+        // one on top, then a row per unit with room for its whole state.
+        MoveWindow(
+            self.page,
+            tx + area.left,
+            pad + area.top,
+            (area.right - area.left).max(0),
+            (area.bottom - area.top).max(0),
+            1,
+        );
+        let (ox, oy) = (tx + area.left + pad * 2, pad + area.top + pad * 2);
+        let gw = self.s(96);
+        MoveWindow(self.start_all, ox, oy, gw, bh, 1);
+        MoveWindow(self.stop_all, ox + gw + pad, oy, gw, bh, 1);
+        let uw = self.s(72);
+        let lw = (area.right - area.left - pad * 5 - uw).max(0);
+        let mut y = oy + bh + pad * 2;
+        for u in &self.units {
+            MoveWindow(u.button, ox, y, uw, self.s(26), 1);
+            MoveWindow(u.label, ox + uw + pad, y + self.s(5), lw, self.s(18), 1);
+            y += self.s(34);
+        }
+
         // The transport button sits in the row of the tabs, at its right
-        // end: on the console it belongs to and away from the switches,
-        // because it holds the view, not the unit.
+        // end: on the consoles and away from the switches, because it
+        // holds the view, not the unit.
         let side = (area.top - self.s(4)).max(self.s(18));
         MoveWindow(self.toggle, tx + tw - side - self.s(2), pad, side, side, 1);
         SetWindowPos(self.toggle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -440,14 +483,27 @@ impl App {
         let _ = w;
     }
 
+    /// The console of the selected tab, if the selected tab is one. Tab 0
+    /// is the page of switches, so console `i` lives in tab `i + 1`.
     fn current(&self) -> Option<usize> {
         let i = unsafe { SendMessageW(self.tabs_ctl, TCM_GETCURSEL, 0, 0) };
-        (i >= 0 && (i as usize) < self.tabs.len()).then_some(i as usize)
+        (i >= 1 && (i as usize) <= self.tabs.len()).then(|| i as usize - 1)
     }
 
-    /// Shows the console of the selected tab and hides the rest.
+    /// Shows what the selected tab holds, the switches or one console,
+    /// and hides everything else.
     unsafe fn show_current(&mut self) {
         let cur = self.current();
+        let switches = if cur.is_none() { SW_SHOW } else { SW_HIDE };
+        ShowWindow(self.page, switches);
+        ShowWindow(self.start_all, switches);
+        ShowWindow(self.stop_all, switches);
+        for u in &self.units {
+            ShowWindow(u.button, switches);
+            ShowWindow(u.label, switches);
+        }
+        // The transport button belongs to the consoles.
+        ShowWindow(self.toggle, if cur.is_some() { SW_SHOW } else { SW_HIDE });
         for (i, t) in self.tabs.iter().enumerate() {
             if Some(i) == cur {
                 SetWindowPos(t.view, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -461,7 +517,25 @@ impl App {
 
     unsafe fn refresh_strip(&mut self) {
         let Some(i) = self.current() else {
-            SetWindowTextW(self.strip, wide("").as_ptr());
+            // On the page of switches the strip sums the units up.
+            let mut counts = [0usize; 5];
+            for u in &self.units {
+                counts[u.state as usize] += 1;
+            }
+            let mut parts = Vec::new();
+            for state in [
+                UnitState::Running,
+                UnitState::Starting,
+                UnitState::Stopping,
+                UnitState::Stopped,
+                UnitState::Failed,
+            ] {
+                let n = counts[state as usize];
+                if n > 0 {
+                    parts.push(format!("{n} {}", state.label()));
+                }
+            }
+            SetWindowTextW(self.strip, wide(&parts.join(", ")).as_ptr());
             EnableWindow(self.toggle, 0);
             return;
         };
@@ -508,12 +582,16 @@ impl App {
                 self.refresh_unit(&u);
                 self.units.push(u);
                 self.layout();
+                self.show_current();
             }
             Command::UnitState { id, state, err } => {
                 if let Some(i) = self.units.iter().position(|u| u.id == id) {
                     self.units[i].state = state;
                     self.units[i].err = err;
                     self.refresh_unit(&self.units[i]);
+                    if self.current().is_none() {
+                        self.refresh_strip();
+                    }
                 }
             }
             Command::ConsoleAdd { id, title } => {
@@ -530,12 +608,10 @@ impl App {
                 let mut item: TCITEMW = zeroed();
                 item.mask = TCIF_TEXT;
                 item.pszText = text.as_mut_ptr();
-                let at = self.tabs.len();
+                // After the page of switches and the consoles already there.
+                let at = self.tabs.len() + 1;
                 SendMessageW(self.tabs_ctl, TCM_INSERTITEMW, at, &item as *const TCITEMW as LPARAM);
                 self.tabs.push(Tab { id, view, note: String::new() });
-                if at == 0 {
-                    SendMessageW(self.tabs_ctl, TCM_SETCURSEL, 0, 0);
-                }
                 self.layout();
                 self.show_current();
                 // The console asks for its first page as soon as it exists.
@@ -560,10 +636,9 @@ impl App {
                 if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
                     let t = self.tabs.remove(i);
                     DestroyWindow(t.view);
-                    SendMessageW(self.tabs_ctl, TCM_DELETEITEM, i, 0);
-                    if !self.tabs.is_empty() {
-                        SendMessageW(self.tabs_ctl, TCM_SETCURSEL, i.min(self.tabs.len() - 1), 0);
-                    }
+                    SendMessageW(self.tabs_ctl, TCM_DELETEITEM, i + 1, 0);
+                    // Falls back on the neighbour, or on the switches.
+                    SendMessageW(self.tabs_ctl, TCM_SETCURSEL, (i + 1).min(self.tabs.len()), 0);
                     self.layout();
                     self.show_current();
                 }
@@ -769,9 +844,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_CTLCOLORSTATIC => {
-            // Labels sit on the window, not on a white box.
+            // A label takes the color of what it sits on: the status
+            // strip is on the window, the unit labels on a tab page.
             SetBkMode(wparam as _, TRANSPARENT as _);
-            GetSysColorBrush(COLOR_BTNFACE) as LRESULT
+            let on = if lparam as HWND == app.strip { COLOR_BTNFACE } else { COLOR_WINDOW };
+            GetSysColorBrush(on) as LRESULT
         }
         WM_CLOSE => {
             if app.tray && IsWindowVisible(hwnd) != 0 {

@@ -37,6 +37,8 @@ pub struct Line {
     pub time_ns: i64,
     /// The text, already made drawable (see [`crate::text`]).
     pub text: String,
+    /// The colored runs of the text, in order. Empty for plain text.
+    pub spans: Vec<crate::text::Span>,
 }
 
 impl Line {
@@ -219,7 +221,7 @@ impl Console {
 
     fn note(missing: u64) -> Line {
         let what = if missing == 1 { "chunk" } else { "chunks" };
-        Line { seq: 0, time_ns: 0, text: format!("--- {missing} {what} not kept ---") }
+        Line { seq: 0, time_ns: 0, text: format!("--- {missing} {what} not kept ---"), spans: Vec::new() }
     }
 
     /// Appends at the end, leaving a note where positions jump.
@@ -331,7 +333,7 @@ mod tests {
     use super::*;
 
     fn lines(from: u64, to: u64) -> Vec<Line> {
-        (from..=to).map(|s| Line { seq: s, time_ns: 0, text: format!("l{s}") }).collect()
+        (from..=to).map(|s| Line { seq: s, time_ns: 0, text: format!("l{s}"), spans: Vec::new() }).collect()
     }
 
     fn seqs(c: &Console) -> Vec<u64> {
