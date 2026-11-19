@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/quevu-ui-core",
+    "crates/quevu-ui-win32",
+    "crates/quevu-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pablo-botella/quevu-ui"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,9 @@
+[package]
+name = "quevu-ui-core"
+description = "Platform-neutral core of the quevu visual part: the console model and the lanes between the host and the UI thread"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
