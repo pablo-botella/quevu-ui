@@ -1,21 +1,30 @@
 //! Platform-neutral core of the quevu visual part.
 //!
 //! Nothing in this crate knows about windows, toolkits or operating
-//! systems. It holds the two things every backend shares:
+//! systems. It holds what every backend shares:
 //!
 //! - [`console`]: the model of a pseudo-console. A console is a view, not
 //!   a store: it keeps what the user can see and a margin around it, and
 //!   asks for everything else by position.
 //! - [`shared`]: the two one-way lanes between the host application and
 //!   the UI thread. Commands go down to the UI, events come back up.
+//! - [`tabs`]: where a tab goes among the others, by its weight.
+//! - [`texts`]: the words the window shows on its own account, which are
+//!   the host's to set.
 //!
 //! A backend (Win32, GTK, Cocoa) draws what the model says and turns what
 //! the user does into calls on the model. The logic of following, pausing
 //! and moving by position is written, and tested, once.
+//!
+//! The window has no language and decides nothing. Every word on it comes
+//! from the host, and so does every tab, control, verb and menu entry; what
+//! the user does with them goes back to the host as an event.
 
 pub mod console;
 pub mod shared;
+pub mod tabs;
 pub mod text;
+pub mod texts;
 
 /// Operations of a feed, as numbered on the wire and in the C interface.
 pub mod op {
@@ -39,45 +48,31 @@ pub mod op {
     pub const HISTORY_AFTER: u32 = 8;
 }
 
-/// State of a unit, numbered as in the host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnitState {
-    Stopped = 0,
-    Starting = 1,
-    Running = 2,
-    Stopping = 3,
-    Failed = 4,
+/// Attributes, as numbered in the C interface. Each kind of thing has its
+/// own word of them; the bits not listed are reserved and must be zero.
+pub mod attr {
+    /// The light of a control goes on and off.
+    pub const LIGHT_BLINK: u32 = 1;
+    /// The light of a control is drawn as a ring: it is off.
+    pub const LIGHT_HOLLOW: u32 = 2;
+
+    /// A verb is shown but cannot be pressed.
+    pub const VERB_DISABLED: u32 = 1;
+
+    /// A menu entry is a line between others. It has no label.
+    pub const MENU_SEPARATOR: u32 = 1;
+    /// A menu entry carries the mark of something that is on.
+    pub const MENU_CHECKED: u32 = 2;
+    /// A menu entry is shown but cannot be chosen.
+    pub const MENU_DISABLED: u32 = 4;
+    /// A menu entry opens a menu of its own instead of being chosen.
+    pub const MENU_SUBMENU: u32 = 8;
 }
 
-impl UnitState {
-    pub fn from_u32(v: u32) -> UnitState {
-        match v {
-            1 => UnitState::Starting,
-            2 => UnitState::Running,
-            3 => UnitState::Stopping,
-            4 => UnitState::Failed,
-            _ => UnitState::Stopped,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            UnitState::Stopped => "stopped",
-            UnitState::Starting => "starting",
-            UnitState::Running => "running",
-            UnitState::Stopping => "stopping",
-            UnitState::Failed => "failed",
-        }
-    }
-
-    /// Whether the switch of the unit offers "stop" (true) or "start".
-    pub fn offers_stop(self) -> bool {
-        matches!(self, UnitState::Running | UnitState::Starting)
-    }
-
-    /// Whether the unit is in the middle of a change and its switch
-    /// should wait.
-    pub fn is_busy(self) -> bool {
-        matches!(self, UnitState::Starting | UnitState::Stopping)
-    }
+/// The two places a menu entry can hang from that are not another entry.
+pub mod menu {
+    /// The bar across the top of the window.
+    pub const BAR: u32 = 0;
+    /// The menu of the icon in the notification area.
+    pub const TRAY: u32 = 0xffff_ffff;
 }

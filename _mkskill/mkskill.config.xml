@@ -3,7 +3,7 @@
   <project id="main" name="quevu-ui" project-type="Other">
     <meta>
       <license>MIT</license>
-      <description>The window of quevu as a dynamic library with a C interface, written in Rust on native toolkits (Win32 working; GTK and Cocoa not written yet): switches, tabs with pseudo-consoles, menu and tray icon. Use when working with the quevu-ui Cargo workspace, quevu_ui.h, quevu_ui.dll, or when writing a new backend.</description>
+      <description>The window of quevu as a dynamic library with a C interface, written in Rust on native toolkits (Win32 working; GTK and Cocoa not written yet): tabs the application opens (pseudo-consoles over logs, tables of controls with lights and verbs), menus and tray icon, all in the words of the application. Use when working with the quevu-ui Cargo workspace, quevu_ui.h, quevu_ui.dll, or when writing a new backend.</description>
     </meta>
   </project>
 </mkskill>

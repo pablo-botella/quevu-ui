@@ -19,29 +19,59 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::console::{Line, Request};
-use crate::UnitState;
+
+/// Something a control, or a control tab, lets the user ask for: a button
+/// with the host's words on it. Pressing it sends `id` back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Verb {
+    pub id: u32,
+    /// See [`crate::attr`].
+    pub attrs: u32,
+    pub label: String,
+}
 
 /// Something the host asks the visual part to do.
 #[derive(Debug)]
 pub enum Command {
-    /// A new switch.
-    UnitAdd { id: u32, name: String },
-    /// A switch changed state.
-    UnitState { id: u32, state: UnitState, err: String },
-    /// A new tab holding a pseudo-console.
-    ConsoleAdd { id: u32, title: String },
+    /// A new tab that shows a source: a pseudo-console.
+    ConsoleAdd { id: u32, title: String, weight: i32 },
+    /// A new tab that shows a table of controls.
+    ControlsAdd { id: u32, title: String, weight: i32 },
+    /// A tab is called something else.
+    TabTitle { id: u32, title: String },
+    /// A tab comes to the front.
+    TabSelect { id: u32 },
+    /// A tab goes away, with everything on it.
+    TabRemove { id: u32 },
+    /// What the status strip of a tab says on the host's account: the
+    /// queues of a log, the summary of a table of controls.
+    TabNote { tab: u32, text: String },
+    /// The verbs of a control tab as a whole, shown in its bar.
+    TabVerbs { tab: u32, verbs: Vec<Verb> },
+    /// A new row in a control tab.
+    ControlAdd { id: u32, tab: u32, name: String },
+    /// A control changed: the color and attributes of its light, the text
+    /// of its state and every verb it offers from now on.
+    ControlState { id: u32, rgb: u32, attrs: u32, text: String, verbs: Vec<Verb> },
+    /// A row goes away.
+    ControlRemove { id: u32 },
     /// Something for a console came down its data lane.
     /// `history` is the source's offer: recent output ran short and there
     /// is a history the user could ask for.
     Deliver { tab: u32, op: u32, full: bool, history: bool, lines: Vec<Line> },
-    /// A note for the status strip of a console (the state of its queues,
-    /// for instance).
-    ConsoleNote { tab: u32, text: String },
-    /// A tab goes away.
-    TabRemove { id: u32 },
-    /// A new entry in the application menu.
-    MenuAdd { id: u32, label: String },
-    /// Whether closing the window hides it in the system tray.
+    /// A new menu entry under `parent`: the bar of the window, the menu of
+    /// the tray icon (see [`crate::menu`]) or another entry that opens a
+    /// menu.
+    MenuAdd { id: u32, parent: u32, label: String, attrs: u32 },
+    /// A menu entry changed its label or its attributes.
+    MenuSet { id: u32, label: String, attrs: u32 },
+    /// A menu entry goes away, with whatever hangs from it.
+    MenuRemove { id: u32 },
+    /// One of the texts the window shows on its own account (see
+    /// [`crate::texts`]).
+    Text { id: u32, text: String },
+    /// Whether the window has an icon in the notification area, and hides
+    /// there when minimized.
     Tray { enabled: bool },
     /// A search found a line: the console moves to the lines around it.
     /// `history` says it was found with the history open.
@@ -54,34 +84,31 @@ pub enum Command {
     FindStatus { tab: u32, text: String, resume: u64, history: bool },
     /// Shows or hides the window.
     Show { visible: bool },
-    /// Ends the event loop.
+    /// Ends the event loop. It is the only way the window goes away.
     Quit,
 }
 
-/// Kinds of [`Event`], as numbered in the C interface.
+/// Kinds of [`Event`], as numbered in the C interface. Numbers 2 to 5
+/// belonged to the fixed switches of earlier versions and are not used.
 pub mod event {
     /// The window exists and the event loop is running.
     pub const READY: u32 = 1;
-    /// The user flipped the switch of unit `id` to "start".
-    pub const UNIT_START: u32 = 2;
-    /// The user flipped the switch of unit `id` to "stop".
-    pub const UNIT_STOP: u32 = 3;
-    /// The global switch, on.
-    pub const START_ALL: u32 = 4;
-    /// The global switch, off.
-    pub const STOP_ALL: u32 = 5;
     /// The console of tab `id` asks its source for `op`, `seq`, `n`.
     pub const CONSOLE_REQUEST: u32 = 6;
-    /// The user chose the application menu entry `id`.
+    /// The user chose the menu entry `id`.
     pub const MENU: u32 = 7;
-    /// The user asked to close the application. The host decides what
-    /// that means and when: usually an orderly stop, then quit.
+    /// The user asked to close the window. It is a request like any
+    /// other: the host decides what it means and when.
     pub const CLOSE: u32 = 8;
     /// The user asked the console of tab `id` to look for a text: `op` is
     /// 1 to look towards newer output and 0 towards older, `seq` is where
     /// to start. Bit 1 of `op` set means the user allowed the history.
     /// The text itself is read with [`super::Shared::find_text`].
     pub const CONSOLE_FIND: u32 = 9;
+    /// The user pressed the verb `op` of the control `id`.
+    pub const CONTROL_VERB: u32 = 10;
+    /// The user pressed the verb `op` of the control tab `id`.
+    pub const TAB_VERB: u32 = 11;
 }
 
 /// What a console is looking for. Events are fixed in size, so this waits
@@ -161,7 +188,7 @@ impl Shared {
         }
     }
 
-    /// A fresh identifier for a unit, a tab or a menu entry. Never zero.
+    /// A fresh identifier for a tab, a control or a menu entry. Never zero.
     pub fn new_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -178,6 +205,13 @@ impl Shared {
     /// UI side: takes every command queued so far, in order.
     pub fn drain(&self) -> Vec<Command> {
         self.commands.lock().unwrap().drain(..).collect()
+    }
+
+    /// UI side: a window is about to exist. Events can be emitted from
+    /// here on, before the event loop is up, and the end a window before
+    /// this one left behind no longer counts.
+    pub fn begin(&self) {
+        self.events.lock().unwrap().ended = false;
     }
 
     /// UI side: the event loop is up. `wake` must make the UI thread call
@@ -281,8 +315,8 @@ mod tests {
     fn events_time_out_arrive_and_end() {
         let s = Arc::new(Shared::new());
         assert_eq!(s.next_event(10), Next::Timeout);
-        s.emit(Event::simple(event::UNIT_STOP, 7));
-        assert_eq!(s.next_event(0), Next::Event(Event::simple(event::UNIT_STOP, 7)));
+        s.emit(Event::simple(event::CONTROL_VERB, 7));
+        assert_eq!(s.next_event(0), Next::Event(Event::simple(event::CONTROL_VERB, 7)));
 
         // A waiting host thread is woken by an event from the UI thread.
         let s2 = s.clone();

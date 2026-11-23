@@ -1,7 +1,11 @@
 //! Small helpers shared by the window and the console view.
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWLP_USERDATA};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, SIZE, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{GetDC, GetTextExtentPoint32W, ReleaseDC, SelectObject, HFONT};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, BS_PUSHBUTTON, GWLP_USERDATA, HMENU,
+    WM_SETFONT, WS_CHILD, WS_DISABLED, WS_TABSTOP, WS_VISIBLE,
+};
 
 /// A Rust string as the NUL-terminated UTF-16 the Win32 API wants.
 pub(crate) fn wide(s: &str) -> Vec<u16> {
@@ -67,4 +71,48 @@ pub(crate) unsafe fn take_state<T>(hwnd: HWND) -> Option<Box<T>> {
     }
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     Some(Box::from_raw(p))
+}
+
+/// The width a text takes in a font, in pixels.
+pub(crate) unsafe fn text_width(hwnd: HWND, font: HFONT, text: &str) -> i32 {
+    let w: Vec<u16> = text.encode_utf16().collect();
+    if w.is_empty() {
+        return 0;
+    }
+    let dc = GetDC(hwnd);
+    let old = SelectObject(dc, font);
+    let mut size = SIZE { cx: 0, cy: 0 };
+    GetTextExtentPoint32W(dc, w.as_ptr(), w.len() as i32, &mut size);
+    SelectObject(dc, old);
+    ReleaseDC(hwnd, dc);
+    size.cx
+}
+
+/// The width of a push button that says `label`: the words and some air,
+/// and never less than a button is expected to be.
+pub(crate) unsafe fn button_width(hwnd: HWND, font: HFONT, label: &str, dpi: u32) -> i32 {
+    (text_width(hwnd, font, label) + scale(24, dpi)).max(scale(64, dpi))
+}
+
+/// A push button as a child of `parent`, with the host's words on it.
+pub(crate) unsafe fn button(parent: HWND, hinst: HINSTANCE, font: HFONT, label: &str, disabled: bool, id: u32) -> HWND {
+    let class = wide("BUTTON");
+    let text = wide(label);
+    let style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32 | if disabled { WS_DISABLED } else { 0 };
+    let h = CreateWindowExW(
+        0,
+        class.as_ptr(),
+        text.as_ptr(),
+        style,
+        0,
+        0,
+        0,
+        0,
+        parent,
+        id as usize as HMENU,
+        hinst,
+        std::ptr::null(),
+    );
+    SendMessageW(h, WM_SETFONT, font as usize, 1);
+    h
 }
