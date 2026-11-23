@@ -90,6 +90,7 @@ Described in full in `include/quevu_ui.h`. Its rules:
 | `quevu_ui_control_add`, `quevu_ui_control_remove` | A row of a control tab |
 | `quevu_ui_control_state` | Everything a control shows: light, text and verbs |
 | `quevu_ui_console_deliver` | What came down the data lane of a console |
+| `quevu_ui_console_time` | Whether a console shows the time of each line |
 | `quevu_ui_console_find_text` | The text a console is looking for |
 | `quevu_ui_console_find_range` | The range of time it is looking within |
 | `quevu_ui_console_goto` | Moves a console to the lines around something found |
@@ -239,7 +240,8 @@ leaves the history.
 **Time.** The entry of the menu of the tab numbered
 `QUEVU_TEXT_MENU_TIME` adds a margin with the local time each chunk
 entered its log. The margin is not part of the text: it is never selected
-or copied. Each tab keeps its own choice.
+or copied. Each tab keeps its own choice, and the host sets how a tab
+starts with `quevu_ui_console_time`.
 
 A chunk is always exactly one line: tabs are expanded and control
 characters become a middle dot.

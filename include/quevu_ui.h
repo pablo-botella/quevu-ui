@@ -241,6 +241,12 @@ void quevu_ui_console_deliver(uint32_t tab, uint32_t op, uint32_t flags,
                               const quevu_ui_chunk *chunks, uint32_t n);
 
 /*
+ * Shows, or stops showing, next to each line of a console when it entered
+ * the log. The user can change it too, from the menu of the tab.
+ */
+void quevu_ui_console_time(uint32_t tab, uint32_t on);
+
+/*
  * Searching. A log may hold millions of chunks, so a search is a step:
  * it starts at a position, walks one way, examines a bounded number of
  * chunks and stops. The host runs the step; the window only asks for it

@@ -285,6 +285,14 @@ pub unsafe extern "C" fn quevu_ui_console_deliver(
     });
 }
 
+/// Shows, or stops showing, next to each line of a console when it entered
+/// the log. It is what the entry of the menu of the tab does: the host
+/// sets how a tab starts, and the user can change it afterwards.
+#[no_mangle]
+pub extern "C" fn quevu_ui_console_time(tab: u32, on: u32) {
+    shared().post(Command::ConsoleTime { tab, on: on != 0 });
+}
+
 /// Reads the text the console of a tab is looking for, after a console
 /// find event. Copies at most `cap - 1` bytes of UTF-8 plus a NUL into
 /// `buf` and returns the length of the whole text, which may be larger.

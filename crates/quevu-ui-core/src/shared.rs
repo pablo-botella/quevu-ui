@@ -73,6 +73,9 @@ pub enum Command {
     /// Whether the window has an icon in the notification area, and hides
     /// there when minimized.
     Tray { enabled: bool },
+    /// Whether a console shows, next to each line, when it entered the log.
+    /// The user can change it too, from the menu of the tab.
+    ConsoleTime { tab: u32, on: bool },
     /// A search found a line: the console moves to the lines around it.
     /// `history` says it was found with the history open.
     Goto { tab: u32, lines: Vec<Line>, mark: u64, history: bool },

@@ -1082,6 +1082,14 @@ impl App {
                     self.retitle(i);
                 }
             }
+            Command::ConsoleTime { tab, on } => {
+                if let Some(s) = self.index(tab).and_then(|i| self.source(i)) {
+                    s.show_time = on;
+                    if let Some(v) = view::of(s.view) {
+                        v.set_show_time(on);
+                    }
+                }
+            }
             Command::Goto { tab, lines, mark, history } => {
                 if let Some(v) = self.index(tab).and_then(|i| self.source(i)).and_then(|s| view::of(s.view)) {
                     v.goto(lines, mark, history);
