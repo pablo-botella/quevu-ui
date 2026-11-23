@@ -1229,6 +1229,7 @@ impl App {
     /// user picks. The words are the host's; an entry it gave no words to
     /// is left out.
     unsafe fn tab_popup(&mut self, i: usize) {
+        let tab = self.tabs[i].id;
         let Some((button, show_time)) = self.source(i).map(|s| (s.menu, s.show_time)) else { return };
         let popup = CreatePopupMenu();
         let mut pending_gap = false;
@@ -1264,8 +1265,12 @@ impl App {
             0
         };
         DestroyMenu(popup);
+        // The window went on living while the menu was open: the tab may
+        // have moved in the row, or be gone.
         if picked > 0 {
-            self.source_command(i, picked as u32);
+            if let Some(i) = self.index(tab) {
+                self.source_command(i, picked as u32);
+            }
         }
     }
 
