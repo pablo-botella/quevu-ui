@@ -1,4 +1,5 @@
-/target
+*.exe
+*.test
+*.out
 
 .claude
-__publish.bat
